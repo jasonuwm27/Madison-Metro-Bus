@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+
+# Local archive spool — raw feed captures live here before upload.
+archive/
+data/
+
+# Downloaded GTFS static zips and extracted CSVs.
+.gtfs-cache/

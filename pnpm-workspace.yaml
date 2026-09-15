@@ -1,0 +1,5 @@
+# pnpm >=10 reads build-script approvals from here, not package.json.
+# esbuild ships a platform binary and must run its install script; vitest and
+# tsx both depend on it.
+onlyBuiltDependencies:
+  - esbuild
