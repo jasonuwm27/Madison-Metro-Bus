@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import dotenv from "dotenv";
 import { z } from "zod";
 
 /**
@@ -8,11 +10,54 @@ import { z } from "zod";
  * runtime error after the process has already missed six hours of collection.
  */
 
+/**
+ * Load .env exactly once, from inside loadConfig rather than as a top-level
+ * `import "dotenv/config"` in each entry point.
+ *
+ * Entry-point imports are fragile in two ways: ESM hoists all imports and
+ * evaluates them in source order, so a dotenv import placed below a module that
+ * reads process.env at evaluation time runs too late; and every new entry point
+ * (a script, a backfill tool, a one-off) has to remember to add it. Doing it
+ * here means the only way to obtain config is through a function that has
+ * already loaded the file, so a future entry point cannot reintroduce the bug.
+ *
+ * `override: false` is the default and is what we want: a real environment
+ * variable set by the host (Heroku, systemd, CI) must beat a stale local .env.
+ */
+let envFileLoaded = false;
+function ensureEnvFileLoaded(): void {
+  if (envFileLoaded) return;
+  envFileLoaded = true;
+  dotenv.config({ quiet: true });
+}
+
+/**
+ * Where bulk files go by default.
+ *
+ * Deliberately outside the project tree on Windows. This repo commonly lives
+ * under OneDrive, and the archive writes a compressed shard continuously while
+ * holding the file open — that means both a few GB per month uploaded to
+ * Microsoft and lock contention with the sync client on a file the worker is
+ * still writing. Neither is acceptable for the one copy of data that cannot be
+ * re-collected.
+ */
+const DEFAULT_ARCHIVE_DIR =
+  process.platform === "win32" ? "C:\\bus-archive" : "./archive";
+const DEFAULT_GTFS_CACHE_DIR =
+  process.platform === "win32" ? join("C:\\bus-archive", ".gtfs-cache") : "./.gtfs-cache";
+
 const intFromEnv = (fallback: number) =>
   z.coerce.number().int().positive().default(fallback);
 
 const EnvSchema = z.object({
-  DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
+  DATABASE_URL: z
+    .string({
+      required_error:
+        "DATABASE_URL is required. This is the POSTGRES connection string from " +
+        "Supabase > Project Settings > Database > Connection string > URI. " +
+        "It is NOT SUPABASE_URL, and the password is not any of the API keys.",
+    })
+    .min(1),
   PGPREPARE: z.enum(["true", "false"]).default("true"),
   PGPOOL_MAX: intFromEnv(4),
 
@@ -44,7 +89,8 @@ const EnvSchema = z.object({
 
   ARCHIVE_SINK: z.enum(["local", "r2"]).default("local"),
   ARCHIVE_COMPRESSION: z.enum(["gzip", "brotli"]).default("gzip"),
-  ARCHIVE_DIR: z.string().default("./archive"),
+  ARCHIVE_DIR: z.string().default(DEFAULT_ARCHIVE_DIR),
+  GTFS_CACHE_DIR: z.string().default(DEFAULT_GTFS_CACHE_DIR),
   R2_ACCOUNT_ID: z.string().default(""),
   R2_BUCKET: z.string().default(""),
   R2_ACCESS_KEY_ID: z.string().default(""),
@@ -74,6 +120,7 @@ export type Config = {
     alerts: string;
   };
   staticUrl: string;
+  gtfsCacheDir: string;
   pollIntervalMs: {
     tripUpdates: number;
     vehiclePositions: number;
@@ -103,6 +150,10 @@ export type Config = {
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  // Must run before the schema reads anything. dotenv mutates process.env in
+  // place, so the default parameter's reference sees the loaded values.
+  ensureEnvFileLoaded();
+
   const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
     const issues = parsed.error.issues
@@ -150,6 +201,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       alerts: e.GTFSRT_ALERTS_URL,
     },
     staticUrl: e.GTFS_STATIC_URL,
+    gtfsCacheDir: e.GTFS_CACHE_DIR,
     pollIntervalMs: {
       tripUpdates: e.POLL_INTERVAL_TRIPS_MS,
       vehiclePositions: e.POLL_INTERVAL_VEHICLES_MS,

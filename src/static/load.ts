@@ -29,7 +29,10 @@ import { parseGtfsTime } from "../util/time.js";
  * Re-running with an unchanged zip is a no-op, so this is safe on a cron.
  */
 
-const CACHE_DIR = ".gtfs-cache";
+// Extraction scratch space. Defaults outside the project tree on Windows
+// (see DEFAULT_GTFS_CACHE_DIR in config.ts) because unpacking the zip writes
+// ~54MB of CSV, and doing that inside a OneDrive-synced folder uploads all of
+// it for no reason.
 const CHUNK = 5_000;
 
 interface FeedInfo {
@@ -98,10 +101,12 @@ export async function loadStatic(options: {
   sql: Sql;
   log: Logger;
   url: string;
+  cacheDir: string;
   zipPath?: string | undefined;
   force?: boolean;
 }): Promise<{ feedVersionId: number | null; feedVersion: string; skipped: boolean }> {
   const { sql, log } = options;
+  const cacheDir = options.cacheDir;
 
   const zipBuffer =
     options.zipPath !== undefined
@@ -111,15 +116,15 @@ export async function loadStatic(options: {
   const sha256 = createHash("sha256").update(zipBuffer).digest("hex");
   log.info({ bytes: zipBuffer.byteLength, sha256 }, "static GTFS fetched");
 
-  await mkdir(CACHE_DIR, { recursive: true });
-  const zipFile = join(CACHE_DIR, "mmt_gtfs.zip");
+  await mkdir(cacheDir, { recursive: true });
+  const zipFile = join(cacheDir, "mmt_gtfs.zip");
   await writeFile(zipFile, zipBuffer);
 
   const zip = new AdmZip(zipFile);
-  zip.extractAllTo(CACHE_DIR, true);
+  zip.extractAllTo(cacheDir, true);
 
   const feedInfoRows: FeedInfo[] = [];
-  await readCsv(join(CACHE_DIR, "feed_info.txt"), (row) => {
+  await readCsv(join(cacheDir, "feed_info.txt"), (row) => {
     feedInfoRows.push(row as unknown as FeedInfo);
   });
   const info = feedInfoRows[0];
@@ -176,7 +181,7 @@ export async function loadStatic(options: {
       on conflict do nothing
     `;
   });
-  const routeCount = await readCsv(join(CACHE_DIR, "routes.txt"), (r) =>
+  const routeCount = await readCsv(join(cacheDir, "routes.txt"), (r) =>
     routes.push(r),
   );
   await routes.drain();
@@ -196,7 +201,7 @@ export async function loadStatic(options: {
       on conflict do nothing
     `;
   });
-  const stopCount = await readCsv(join(CACHE_DIR, "stops.txt"), (r) => stops.push(r));
+  const stopCount = await readCsv(join(cacheDir, "stops.txt"), (r) => stops.push(r));
   await stops.drain();
 
   const trips = batcher<Record<string, string>>(CHUNK, async (rows) => {
@@ -216,7 +221,7 @@ export async function loadStatic(options: {
       on conflict do nothing
     `;
   });
-  const tripCount = await readCsv(join(CACHE_DIR, "trips.txt"), (r) => trips.push(r));
+  const tripCount = await readCsv(join(cacheDir, "trips.txt"), (r) => trips.push(r));
   await trips.drain();
 
   const calendar = batcher<Record<string, string>>(CHUNK, async (rows) => {
@@ -239,7 +244,7 @@ export async function loadStatic(options: {
       on conflict do nothing
     `;
   });
-  const calendarCount = await readCsv(join(CACHE_DIR, "calendar.txt"), (r) =>
+  const calendarCount = await readCsv(join(cacheDir, "calendar.txt"), (r) =>
     calendar.push(r),
   );
   await calendar.drain();
@@ -258,7 +263,7 @@ export async function loadStatic(options: {
     `;
   });
   const calendarDateCount = await readCsv(
-    join(CACHE_DIR, "calendar_dates.txt"),
+    join(cacheDir, "calendar_dates.txt"),
     (r) => calendarDates.push(r),
   );
   await calendarDates.drain();
@@ -289,7 +294,7 @@ export async function loadStatic(options: {
       log.info({ stopTimeCount }, "stop_times progress");
     }
   });
-  await readCsv(join(CACHE_DIR, "stop_times.txt"), (r) => stopTimes.push(r));
+  await readCsv(join(cacheDir, "stop_times.txt"), (r) => stopTimes.push(r));
   await stopTimes.drain();
 
   await sql`
@@ -321,10 +326,12 @@ async function main(): Promise<void> {
   const sql = createSql(cfg);
   try {
     await runMigrations(sql, log);
+    log.info({ cacheDir: cfg.gtfsCacheDir }, "using GTFS extraction cache");
     await loadStatic({
       sql,
       log,
       url: cfg.staticUrl,
+      cacheDir: cfg.gtfsCacheDir,
       force: process.argv.includes("--force"),
       zipPath: process.argv
         .find((a) => a.startsWith("--zip="))

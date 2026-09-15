@@ -4,9 +4,19 @@ dist/
 .env.local
 *.log
 
-# Local archive spool — raw feed captures live here before upload.
+# Local archive spool -- raw feed captures live here before upload.
+# By default these live OUTSIDE the repo (C:\bus-archive on Windows), but these
+# patterns stay so that pointing ARCHIVE_DIR back inside the tree cannot
+# accidentally commit gigabytes of shards. Matches at any depth.
 archive/
+**/archive/
+bus-archive/
 data/
+*.ndjson.gz
+*.ndjson.br
+*.ndjson.gz.partial
+*.ndjson.br.partial
 
 # Downloaded GTFS static zips and extracted CSVs.
 .gtfs-cache/
+**/.gtfs-cache/

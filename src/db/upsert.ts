@@ -49,7 +49,13 @@ export async function upsertObservations(
   const serviceDate: string[] = [];
   const tripId: string[] = [];
   const stopSequence: number[] = [];
-  const isModified: boolean[] = [];
+  // Sent as text, not boolean. postgres.js infers a JS boolean array as a
+  // scalar `boolean` parameter rather than `boolean[]`, so `$n::boolean[]`
+  // fails with "cannot cast type boolean to boolean[]" -- and because it fails
+  // at the cast, it takes the entire poll's batch with it. text[], int[],
+  // date[] and timestamptz[] all infer correctly; boolean is the exception.
+  // `::text[]::boolean[]` round-trips exactly (verified against the database).
+  const isModified: string[] = [];
   const routeId: string[] = [];
   const stopId: string[] = [];
   const scheduledHour: (number | null)[] = [];
@@ -66,7 +72,7 @@ export async function upsertObservations(
     serviceDate.push(row.serviceDate);
     tripId.push(row.tripId);
     stopSequence.push(row.stopSequence);
-    isModified.push(row.isModified);
+    isModified.push(String(row.isModified));
     routeId.push(row.routeId);
     stopId.push(row.stopId);
     scheduledHour.push(row.scheduledHourLocal);
@@ -102,7 +108,7 @@ export async function upsertObservations(
       ${serviceDate}::date[],
       ${tripId}::text[],
       ${stopSequence}::smallint[],
-      ${isModified}::boolean[],
+      ${isModified}::text[]::boolean[],
       ${routeId}::text[],
       ${stopId}::text[],
       ${scheduledHour}::smallint[],
@@ -149,14 +155,19 @@ export async function upsertObservations(
         else stop_time_observations.scheduled_source
       end
     returning
-      (xmax = 0) as inserted,
+      -- Distinguishing a fresh INSERT from an UPDATE. The usual trick is
+      -- xmax = 0, but xmax is a system column and Postgres refuses to expose
+      -- system columns through RETURNING on a PARTITIONED table: the tuple
+      -- comes from a child partition, so there is no stable system column to
+      -- project. Instead we infer it from our own bookkeeping -- poll_count is
+      -- set to 1 on insert and incremented on every conflict, so poll_count = 1
+      -- means this row was created by this statement.
+      (stop_time_observations.poll_count = 1) as inserted,
       (stop_time_observations.change_count > 0) as changed
   `;
 
   return {
     rowsWritten: result.length,
-    // xmax = 0 identifies a genuine INSERT, so this counts how many of the
-    // batch were newly observed rather than re-reported.
     rowsChanged: result.filter((r) => r.inserted).length,
   };
 }
