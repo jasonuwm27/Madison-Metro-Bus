@@ -43,6 +43,7 @@ const EnvSchema = z.object({
   BACKOFF_MAX_MS: intFromEnv(120_000),
 
   ARCHIVE_SINK: z.enum(["local", "r2"]).default("local"),
+  ARCHIVE_COMPRESSION: z.enum(["gzip", "brotli"]).default("gzip"),
   ARCHIVE_DIR: z.string().default("./archive"),
   R2_ACCOUNT_ID: z.string().default(""),
   R2_BUCKET: z.string().default(""),
@@ -86,6 +87,7 @@ export type Config = {
   };
   archive: {
     sink: "local" | "r2";
+    compression: "gzip" | "brotli";
     dir: string;
     r2: {
       accountId: string;
@@ -161,6 +163,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     },
     archive: {
       sink: e.ARCHIVE_SINK,
+      compression: e.ARCHIVE_COMPRESSION,
       dir: e.ARCHIVE_DIR,
       r2: {
         accountId: e.R2_ACCOUNT_ID,

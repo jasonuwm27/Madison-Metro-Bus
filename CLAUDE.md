@@ -1,0 +1,284 @@
+# CLAUDE.md
+
+Context for future sessions on this repo. Read this before changing the schema
+or the transform.
+
+## What this is
+
+A collector that archives Madison Metro's GTFS-RT feeds so that historical
+on-time performance data exists. Nobody else archives these feeds. Every day the
+collector is down is a day of history that cannot be recovered from any source.
+That single fact drives most of the decisions below.
+
+**Phase 1 (done): ingestion only.** No frontend, no analysis endpoints, no auth.
+Do not scaffold a React app.
+
+## Verified facts about the feeds
+
+Verified against live payloads on 2026-09-15. Do not trust the GTFS-RT spec's
+optional fields — verify against a real payload before relying on one.
+
+| Feed | URL | Notes |
+|---|---|---|
+| TripUpdates | `https://metromap.cityofmadison.com/gtfsrt/trips` | ~132 KB, 233 entities |
+| VehiclePositions | `https://metromap.cityofmadison.com/gtfsrt/vehicles` | ~5.6 KB, 96 entities |
+| Alerts | `https://metromap.cityofmadison.com/gtfsrt/alerts` | ~1.3 KB, 4 entities |
+| Static | `https://transitdata.cityofmadison.com/GTFS/mmt_gtfs.zip` | 7.3 MB |
+
+**No API key.** All three RT feeds return HTTP 200 unauthenticated. The
+`dev-account` key on Metro's developer page is for the separate Bus Tracker API,
+not for GTFS. Use is governed by Metro's Developer License Agreement.
+
+Five properties of the TripUpdates feed that the schema is built around:
+
+1. **There is no `delay` field anywhere.** Not on `tripUpdate`, not on
+   `stopTimeUpdate.arrival`. Only absolute epoch `arrival.time`. Every lateness
+   number must come from joining static `stop_times`. This makes the static
+   loader a hard dependency of the analysis, not an optional extra.
+2. **There is no `trip.start_date`.** The service day must be inferred by
+   matching observed times against the schedule. See "Service dates" below.
+3. **The feed is heterogeneous.** The sample held 228 `tripUpdate`, 2 `shape`,
+   1 `stop`, and 2 `tripModifications` entities. Code that assumes every entity
+   is a tripUpdate will throw or silently drop data.
+4. **Detoured trips are published twice.** Once as a planned modified itinerary
+   (no `trip_id`, carries `modifiedTrip.affectedTripId`, all stops, no vehicle)
+   and once as a live vehicle update (real `trip_id`, remaining stops only,
+   vehicle attached). They overlap and disagree by about a second. In the
+   sample, trips `3856020` and `4314020` each appeared this way, colliding on 46
+   stop sequences. `is_modified` in the primary key does **not** separate them —
+   `transformFeed` applies a precedence rule instead.
+5. **Predictions churn hard.** Two polls 90 seconds apart shared 4,968
+   (trip, stop) keys, of which 1,342 (27%) had a changed predicted arrival.
+   282 keys vanished — those are buses that passed the stop.
+
+`tripModifications` entities carry `replacementStops` with **only** `stopId` —
+no `stop_sequence`, no travel times. Not a usable schedule source. There is a
+`propagatedModificationDelay`, but it is one coarse value for the whole
+modification. Do not build against it.
+
+### Static feed
+
+603,662 `stop_times`, 14,199 trips, 1,659 stops, 19 routes.
+`feed_version S072_202608240858`, valid 2026-08-16 to **2026-12-05**.
+
+3,827 `stop_times` rows have times past `24:00:00`. 82.8% of rows are
+`timepoint=0`, meaning their scheduled time is *interpolated* between
+timepoints — delay at those stops is measured against an estimate, and analysis
+may want to weight or filter on it.
+
+Daily volume, counted from the static feed: 171,795 stop events per weekday
+(4,107 trips), 80,703 Saturday, 72,605 Sunday. **~1.01M rows/week,
+~4.4M/month, ~970 MB/month with indexes.**
+
+## Architecture
+
+```
+  Metro GTFS-RT ──► fetch (retry/backoff) ──► ARCHIVE (raw bytes, first)
+                                                 │
+                                                 ▼
+                                           decode (pure)
+                                                 │
+                                                 ▼
+                    ScheduleCache ────────► transform (pure)
+                     (static GTFS)                │
+                                                 ▼
+                                    upsertObservations (convergent)
+                                                 │
+                                                 ▼
+                                    stop_time_observations
+                                     (weekly partitions, 45d)
+                                                 │
+                                                 ▼
+                                  rollup_daily (90d) ──► rollup_monthly (∞)
+```
+
+**The archive is the record of record; Postgres is a cache.** Raw bytes are
+written to the archive *before* decoding, so a decoder bug or a schema mistake
+is a replay away rather than a permanent hole. This is what makes dropping
+partitions at 45 days acceptable — eviction is not data loss.
+
+Archive volume, measured on a real 131,904-byte payload: 54,307 B/poll as
+gzipped base64 NDJSON, so **~5 GB/month** across all three feeds. R2's free tier
+covers ~2 months; `ARCHIVE_COMPRESSION=brotli` brings it to ~3.7 GB/month with
+an identical on-disk format.
+
+### Layer boundaries
+
+- `src/gtfsrt/decode.ts`, `src/gtfsrt/transform.ts`, `src/util/time.ts` are
+  **pure and synchronous**. No network, no clock, no database. This is
+  deliberate: it is the entire tested surface. Keep it that way — if the
+  transform needs data, load it first and pass it in, as `ScheduleIndex` does.
+- `src/db/*` owns all SQL. `src/worker.ts` wires things together and owns the
+  poll loops and failure handling.
+- Tests run against checked-in protobuf fixtures in `test/fixtures/`. **Never
+  add a test that hits the network or a database** — CI has no secrets and must
+  stay that way.
+
+## Schema decisions
+
+### Row model: collapsed, not append
+
+One row per `(service_date, trip_id, stop_sequence, is_modified)`, upserted on
+every poll. `observed_arrival` holds the newest prediction; when the bus passes,
+the stop stops being reported and the last value stands — that value *is* the
+observed arrival. Metro even keeps reporting a stop briefly after passage with
+the actual time (57 of 5,772 arrival times in the sample were already past).
+
+Appending every poll would cost ~2M rows/day; appending every *change* still
+costs ~600k/day. Churn is not thrown away: `first_predicted_arrival`,
+`min_predicted_arrival`, `max_predicted_arrival` and `change_count` retain its
+magnitude, and the full history is in the archive.
+
+### Idempotency
+
+**The primary key is the idempotency key.** The upsert is convergent, not merely
+guarded: re-polling, restarting mid-poll, or replaying an archive shard all
+produce the same final row. Only `poll_count` and `last_seen_at` move on a
+repeat, and they move monotonically.
+
+The `ON CONFLICT` clause only ever *adds* information. `COALESCE` guards mean a
+poll that cannot resolve a schedule can never blank out a match already
+established — without them, one poll arriving before the static load finished
+would wipe schedule data for the whole day.
+
+Duplicates **within** a single poll are collapsed in `transformFeed` before the
+write. This is not optional: Postgres rejects an `ON CONFLICT DO UPDATE` that
+touches the same row twice in one statement, and that error aborts the entire
+batch — losing the whole poll, not just the duplicate.
+
+### Indexing: only immutable columns
+
+The table takes ~6,000 UPDATEs per poll, ~17M/day. Postgres can apply these as
+HOT (heap-only tuple) updates, touching no index at all — **but only if no
+indexed column changed.**
+
+So every column that mutates on a poll (`observed_arrival`, `delay_seconds`,
+`change_count`, `poll_count`, `last_seen_at`) is left unindexed, and every
+indexed column is fixed at insert. Partitions are created with `fillfactor = 85`
+to leave in-page room for HOT updates.
+
+**Adding an index on `delay_seconds` or `last_seen_at` would look harmless and
+would silently convert all ~17M daily updates into non-HOT updates**, each
+writing fresh entries into every index. Do not do it without measuring.
+
+Two indexes exist:
+- `(stop_id, route_id, scheduled_hour_local)` serves the target query. `stop_id`
+  leads because it is most selective (1,659 stops vs 19 routes) and because its
+  prefixes independently answer "everything at this stop" and "this route at
+  this stop, all day". **Tradeoff:** a route-first query cannot use it and falls
+  back to a partition scan. Accepted; the product is stop-centric.
+- `(service_date)` for the rollup and the retention guard.
+
+### Generated column
+
+`delay_seconds` is `GENERATED ALWAYS ... STORED` over `observed_arrival -
+scheduled_arrival`, so it cannot drift from its operands and recomputes if a
+scheduled time is corrected. `timestamptz - timestamptz` is IMMUTABLE (a pure
+duration), which is what makes it legal in a generated column.
+
+`scheduled_hour_local` and `day_type` are **not** generated — converting a
+timestamptz to a named zone is STABLE, not IMMUTABLE (the tz database can
+change), so Postgres rejects it in generated columns and plain index
+expressions. The worker computes them.
+
+`scheduled_source` records provenance: `0` unmatched, `1` matched the schedule
+in effect, `2` matched but this is a detour trip whose static row describes the
+*pre*-detour routing. Without it, an unmatched row and a genuinely on-time row
+are indistinguishable once `delay_seconds` is null-coalesced downstream.
+
+### Partitioning
+
+Weekly range partitions on `service_date`. The reason is **retention, not query
+speed**. `DROP TABLE` on a partition is an instant catalog operation; the DELETE
+it replaces would rewrite ~1M rows, leave dead tuples for VACUUM, and bloat both
+indexes while competing with a worker writing ~200 rows/sec.
+
+Weekly rather than daily because planning time grows with partition count —
+weekly keeps it near 52/year instead of 365.
+
+A **DEFAULT partition exists as a safety net.** If partition creation ever falls
+behind, inserts land there instead of failing. A failed insert is unrecoverable
+loss; a row in the wrong partition is a chore. `pnpm partitions` warns if the
+default is non-empty.
+
+### Rollups
+
+`n`, `sum_delay`, `sum_delay_sq`, `min`, `max` are **algebraic** — they compose,
+so exact mean and stddev for any date range come from the rollup without
+touching raw. That is why `sum_delay_sq` is stored rather than a precomputed
+stddev, which would not compose.
+
+Percentiles are **holistic** — a monthly p50 is not derivable from thirty daily
+p50s. So both levels compute percentiles from raw.
+
+**Load-bearing ordering constraint:** the monthly rollup reads raw, so month M
+must be rolled up before M's partitions pass the 45-day drop. A month is at most
+31 days old when it closes, leaving 14 days of slack. `dropExpiredPartitions`
+enforces this — it refuses to drop a partition whose days are not in
+`rollup_daily`.
+
+## Service dates — the fragile part
+
+`src/util/time.ts`. Treat changes here with suspicion and keep the tests green.
+
+The feed carries no `start_date`, so the service day is inferred: take the
+observation's local date and its two neighbours, keep the dates on which the
+trip actually runs per `calendar`/`calendar_dates`, and choose the one whose
+scheduled instant is nearest the observed one. Distance-minimising rather than
+clock arithmetic is what makes after-midnight trips work — at 00:30 local, a
+trip scheduled 24:30:00 is 0 seconds from the previous service date and 24 hours
+from the current one, and the same comparison still works when the bus is late.
+
+A trip is anchored **once**, by the first stop with both a schedule entry and an
+observed arrival, and all its stops share that date. A trip cannot straddle two
+service days, and resolving per stop would let a late bus disagree with itself
+across midnight.
+
+**Nothing is ever dropped for want of a service date.** An unanchored trip is
+recorded under the feed's local date with its schedule deliberately withheld, so
+it reads as unmatched rather than carrying a delay computed against a guess.
+Losing an observation is permanent; an unmatched row is fixable from the archive.
+
+Service day start is local noon minus 12 hours, per GTFS. Going through noon is
+what makes it DST-safe — local midnight can be skipped or repeated, noon never
+is. A consequence worth knowing: the 23- and 25-hour service days land on the
+date *before* each transition (2026-03-07 and 2026-10-31), because a service day
+is derived from its own date's noon and Sunday's noon already carries the new
+offset. There is a test pinning this.
+
+## Conventions
+
+- TypeScript strict throughout, plus `noUncheckedIndexedAccess` and
+  `exactOptionalPropertyTypes`. Both catch real bugs in this codebase; do not
+  relax them.
+- `.js` extensions on relative imports (ESM + `verbatimModuleSyntax`).
+- Config via env, validated once at startup with zod. A bad env var should crash
+  immediately, not surface at 3am.
+- Structured logs via pino. Every poll emits one summary line.
+- Comments explain *why*, especially where the code looks odd — most odd-looking
+  code here is odd because the feed is.
+
+## Operational invariants
+
+- **The worker must never exit on a feed or database failure.** Every failure
+  path degrades: retry next tick, log, keep running. Only startup errors exit.
+- Archive writes happen before decode.
+- A failed upload keeps the local shard. Never delete a shard that was not
+  confirmed uploaded.
+- Supabase free tier pauses after ~7 days of **database** inactivity. A worker
+  upserting every 30s prevents this — but a dead worker means the project
+  pauses on top of the outage, compounding it. Hence the healthcheck.
+
+## Known gaps / next steps
+
+- **Departure-only stops are skipped.** 149 of 6,035 in the sample — trip origin
+  stops, where arrival is meaningless. If a stop of interest turns out to be a
+  trip origin, revisit. The archive retains them.
+- VehiclePositions and Alerts are archived but not decoded. VehiclePositions is
+  the only independent check on the final-prediction-as-arrival assumption, so
+  decoding it is the natural phase 2.
+- No backfill tool yet for replaying archive shards into Postgres. The archive
+  format is designed for it (one JSON line per poll, `payload_b64`), but the
+  replayer is unwritten.
+- `rollup_daily`/`rollup_monthly` tables and functions exist; no scheduler is
+  wired up. Run `pnpm rollup` daily and `pnpm partitions --drop` weekly.

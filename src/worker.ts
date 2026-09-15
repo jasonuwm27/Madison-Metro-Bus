@@ -126,6 +126,7 @@ async function main(): Promise<void> {
     logger: log,
     uploader,
     deleteLocalAfterUpload: cfg.archive.deleteLocalAfterUpload,
+    compression: cfg.archive.compression,
   });
 
   // A day boundary means new partitions may be needed and the trip cache is
