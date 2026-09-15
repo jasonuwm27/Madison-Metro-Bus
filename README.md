@@ -137,7 +137,7 @@ pnpm partitions --drop           # evict past 45 days (refuses if not rolled up)
 Other commands:
 
 ```bash
-pnpm test        # 53 tests, all against checked-in fixtures — no network, no DB
+pnpm test        # 60 tests, all against checked-in fixtures — no network, no DB
 pnpm typecheck
 ```
 
