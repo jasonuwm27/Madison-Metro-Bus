@@ -269,6 +269,62 @@ offset. There is a test pinning this.
   upserting every 30s prevents this — but a dead worker means the project
   pauses on top of the outage, compounding it. Hence the healthcheck.
 
+## Deployment (2026-09-16)
+
+Production runs on an Oracle Cloud Always Free VM, not the laptop.
+
+| | |
+|---|---|
+| Host | `163.192.9.150`, user `opc`, Oracle Linux 9.8 |
+| Shape | `VM.Standard.A1.Flex`, **aarch64** Ampere, 2 OCPU / 12 GB, us-sanjose-1 |
+| Repo | `/opt/bus/repo`, runs as `opc` |
+| Archive | `/var/lib/bus-archive` (30 GB volume, ~20 GB free) |
+| Runtime | Node 22 ARM64 + tsx (no build step; dist/ cannot go stale) |
+
+**Architecture matters.** The box is aarch64; `esbuild` (via tsx/vitest) ships
+per-arch binaries. Never copy `node_modules` from an x86 machine.
+
+Units: `bus-worker.service` (Restart=always, RestartSec=10,
+StartLimitIntervalSec=0 so it never gives up), plus timers `bus-rollup`
+(daily 03:15 CT), `bus-partitions` (Mon 02:30 CT), `bus-drop`
+(daily 06:15 CT, 15-day retention). `bus-drop.service` declares
+`Requires=`/`After=bus-rollup.service`, so eviction cannot run without a
+successful rollup — belt and braces with the in-code guard in
+`dropExpiredPartitions`.
+
+journald is capped at `SystemMaxUse=500M` / `SystemKeepFree=2G` /
+`MaxRetentionSec=30day`.
+
+Oracle's restrictive default iptables is NOT present on this image — INPUT is
+empty with policy ACCEPT, and Metro, Supabase and GitHub were all reachable
+without touching firewall rules.
+
+## Two bugs that destroyed the first day of archive
+
+Both found by deploying, not by testing. Worth understanding before touching
+the archive or the worker's lifecycle.
+
+**Append-mode shard writes.** Shards were opened `flags:"a"`. A worker
+restarting inside the same UTC hour piped a second gzip stream onto an
+unfinalised first one. Concatenated gzip members are legal; a *truncated*
+member followed by another is not. Every shard from 2026-09-15 is unreadable
+("invalid block type", "invalid distance code"). Now `flags:"wx"` with
+rotate-aside on collision. Regression test in `test/archive.test.ts`.
+
+**Shutdown woke only one sleeper.** `Shutdown` held a single resolver handle
+shared by three concurrently-sleeping poll loops, so each `sleep()` clobbered
+the last. On SIGTERM only the newest woke; the alerts loop sat out its full
+300s interval, exceeded systemd's `TimeoutStopSec=60`, and got SIGKILLed
+mid-write. Now a `Set` of waiters. Tests in `test/shutdown.test.ts`.
+
+These compounded: SIGKILL left a `.partial` behind, and the next start appended
+to it. The Postgres rows survived both; only raw bytes were lost.
+
+**Lesson worth keeping:** the archive is the thing that cannot be re-collected,
+so its integrity deserves verification, not assumption. `node /tmp/chk.js` on
+the VM decompresses every shard and reports record counts — run it after any
+change to the archive path.
+
 ## Known gaps / next steps
 
 - **Departure-only stops are skipped.** 149 of 6,035 in the sample — trip origin
@@ -280,5 +336,10 @@ offset. There is a test pinning this.
 - No backfill tool yet for replaying archive shards into Postgres. The archive
   format is designed for it (one JSON line per poll, `payload_b64`), but the
   replayer is unwritten.
+- `scripts/upload-archive.ts` pushes local shards to R2 (idempotent, keyed by
+  feed/date/hour, never deletes). R2 credentials are not yet configured, so the
+  VM archive is currently single-copy on local disk.
+- 2026-09-15 raw archive is permanently lost (see above). Postgres rows for
+  that day are intact.
 - `rollup_daily`/`rollup_monthly` tables and functions exist; no scheduler is
   wired up. Run `pnpm rollup` daily and `pnpm partitions --drop` weekly.
