@@ -325,6 +325,55 @@ so its integrity deserves verification, not assumption. `node /tmp/chk.js` on
 the VM decompresses every shard and reports record counts — run it after any
 change to the archive path.
 
+## Archive backup: Google Drive via rclone (2026-09-16)
+
+Drive is the permanent, authoritative copy. Local disk is a 90-day hot cache.
+
+| | |
+|---|---|
+| Remote | `gdrive:BusProject/archive` (pinned; copy cannot write above it) |
+| Layout | `feed/YYYY/MM/DD/HH.ndjson.gz` |
+| Account | 5 TiB total, 4.999 TiB free |
+| Scope | `drive.file` -- rclone only sees files it created |
+| Unit | `bus-archive-sync.timer`, daily 04:30 CT |
+
+`rclone copy`/`copyto`, **never `rclone sync`**. sync mirrors the destination to
+the source, so paired with the local pruner it would propagate every prune into
+the only backup and eat the archive from the oldest end forward.
+
+**Pruning is gated on MD5, never on existence or age.** A remote file can exist
+at the right *size* and still be corrupt; only the hash catches that. Verified
+by deliberately corrupting a remote shard to the same byte count -- the prune
+withheld it (`pruned: 2, withheld: 1`) while a size check would have deleted
+the last good copy.
+
+Upload selection is also by MD5. Selecting by size left a same-size corrupt
+remote permanently un-repaired: excluded as "already present", failed hash
+confirmation, excluded again next run, logging "will re-upload" forever.
+
+Order is enforced *inside one process*, not across two units: the prune can only
+act on shards that same invocation just confirmed. There is no window where a
+failed upload is followed by a prune that trusts it.
+
+Timer ordering: rollup 03:15 -> archive-sync 04:30 -> partition drop 06:15 CT.
+
+### Verified, not assumed
+
+`--verify` downloads a shard, decompresses it, and compares decoded protobuf
+payloads. An independent check (`/tmp/rt.js` on the VM) additionally re-decodes
+every Drive copy with the real GTFS-RT decoder: 4,482,089 bytes across 25
+records, 7,511 entities, byte-identical. Local shards were also fully restored
+*from Drive* after the prune test -- a live disaster-recovery proof.
+
+### KNOWN EXPIRY -- rclone's shared client_id
+
+`rclone about` warns: rclone's shared Google client_id **is being retired and
+will stop working during 2026**. Backups will silently start failing when that
+happens. Fix is to create a personal OAuth client ID
+(https://rclone.org/drive/#making-your-own-client-id) and add `client_id` /
+`client_secret` to `~/.config/rclone/rclone.conf`. Not urgent, but it is a
+dated failure, not a hypothetical one.
+
 ## Known gaps / next steps
 
 - **Departure-only stops are skipped.** 149 of 6,035 in the sample — trip origin
