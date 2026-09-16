@@ -74,6 +74,19 @@ async function rclone(args: string[], log: Logger): Promise<string> {
   }
 }
 
+/**
+ * Strip credentials from anything that might be logged.
+ *
+ * Node puts the whole failed command line into an ExecFileException's message,
+ * and these commands carry DATABASE_URL as an argument -- so an unredacted
+ * error log prints the database password. Learned the hard way.
+ */
+function redact(text: string): string {
+  return text
+    .replace(/(postgres(?:ql)?:\/\/[^:]+:)[^@]*(@)/g, "$1<redacted>$2")
+    .replace(/(password=)[^\s&]+/gi, "$1<redacted>");
+}
+
 function md5(path: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const hash = createHash("md5");
@@ -167,11 +180,16 @@ async function main(): Promise<void> {
     // -Fc custom format: compressed, and pg_restore can pull individual
     // tables out of it. --no-owner/--no-acl so it restores cleanly into a
     // database with different role names, which a scratch verify DB has.
-    await run(
-      "pg_dump",
-      ["--format=custom", "--compress=9", "--no-owner", "--no-acl", "--file", localPath, cfg.databaseUrl],
-      { maxBuffer: 1024 * 1024 * 1024 },
-    );
+    try {
+      await run(
+        "pg_dump",
+        ["--format=custom", "--compress=9", "--no-owner", "--no-acl", "--file", localPath, cfg.databaseUrl],
+        { maxBuffer: 1024 * 1024 * 1024 },
+      );
+    } catch (error) {
+      const e = error as { stderr?: string; message?: string };
+      throw new Error(redact(`pg_dump failed: ${e.stderr ?? e.message ?? String(error)}`));
+    }
     const { size } = await stat(localPath);
     log.info(
       { file: name, megabytes: +(size / 1e6).toFixed(2), durationMs: Date.now() - started },
@@ -275,8 +293,13 @@ async function verifyRestore(
   const target = sourceUrl.replace(/\/[^/?]+(\?|$)/, `/${scratch}$1`);
 
   const psql = async (url: string, sql: string): Promise<string> => {
-    const { stdout } = await run("psql", [url, "-tAc", sql], { maxBuffer: 32 * 1024 * 1024 });
-    return stdout.trim();
+    try {
+      const { stdout } = await run("psql", [url, "-tAc", sql], { maxBuffer: 32 * 1024 * 1024 });
+      return stdout.trim();
+    } catch (error) {
+      const e = error as { stderr?: string; message?: string };
+      throw new Error(redact(`psql failed: ${e.stderr ?? e.message ?? String(error)}`));
+    }
   };
 
   try {
@@ -286,22 +309,74 @@ async function verifyRestore(
     await run("pg_restore", ["--no-owner", "--no-acl", "--dbname", target, dumpPath], {
       maxBuffer: 1024 * 1024 * 1024,
     }).catch((e: unknown) => {
-      // pg_restore warns about non-fatal issues via non-zero exit; surface but
-      // continue to the comparison, which is the real test.
-      log.warn({ err: String(e).slice(0, 200) }, "pg_restore reported warnings");
+      // pg_restore exits non-zero for non-fatal warnings too, so continue to
+      // the row-count comparison, which is the real test. Redact first: the
+      // exception message contains the full command line including the URL.
+      const detail = redact(String((e as { stderr?: string }).stderr ?? e)).slice(0, 300);
+      log.warn({ detail }, "pg_restore reported warnings");
     });
 
-    const tables = ["stop_time_observations", "static_stop_times", "static_trips", "rollup_daily"];
+    // COMPARE AGAINST THE SNAPSHOT, NOT AGAINST LIVE.
+    //
+    // pg_dump takes a consistent snapshot when it starts. The worker keeps
+    // inserting during the dump, so the live table is legitimately AHEAD of
+    // the restored copy by however many rows landed while it ran -- naively
+    // comparing counts reports a permanent mismatch and can never pass.
+    //
+    // The restored database tells us exactly where the snapshot landed: the
+    // newest first_seen_at it contains. first_seen_at is set once at insert
+    // and never updated, so counting source rows at or below that watermark
+    // compares like with like.
+    const watermark = await psql(
+      target,
+      "select coalesce(max(first_seen_at)::text, 'epoch') from stop_time_observations",
+    );
+    log.info({ snapshotWatermark: watermark }, "dump snapshot boundary, from the restored copy");
+
+    const checks: { table: string; where: string }[] = [
+      { table: "stop_time_observations", where: `where first_seen_at <= '${watermark}'::timestamptz` },
+      // Static tables are written only by the loader, never by the worker, so
+      // they are stable during a dump and need no watermark.
+      { table: "static_stop_times", where: "" },
+      { table: "static_trips", where: "" },
+      { table: "static_stops", where: "" },
+      { table: "rollup_daily", where: "" },
+    ];
+
     let allMatch = true;
-    for (const table of tables) {
+    for (const { table, where } of checks) {
       const [a, b] = await Promise.all([
-        psql(sourceUrl, `select count(*) from ${table}`),
-        psql(target, `select count(*) from ${table}`),
+        psql(sourceUrl, `select count(*) from ${table} ${where}`),
+        psql(target, `select count(*) from ${table} ${where}`),
       ]);
       const match = a === b;
       if (!match) allMatch = false;
-      log.info({ table, source: Number(a), restored: Number(b), match }, "row count comparison");
+      log.info(
+        { table, source: Number(a), restored: Number(b), match, windowed: where !== "" },
+        "row count comparison",
+      );
     }
+
+    // Beyond counts: verify the data itself survived, not merely the row
+    // count. A dump that restored the right NUMBER of corrupted rows would
+    // pass a count check.
+    const checksum = async (url: string): Promise<string> =>
+      psql(
+        url,
+        `select coalesce(md5(string_agg(t::text, '|' order by t.service_date, t.trip_id, t.stop_sequence, t.is_modified)), 'empty')
+         from (select service_date, trip_id, stop_sequence, is_modified, observed_arrival, delay_seconds
+               from stop_time_observations
+               where first_seen_at <= '${watermark}'::timestamptz
+               order by service_date, trip_id, stop_sequence, is_modified
+               limit 5000) t`,
+      );
+    const [cs1, cs2] = await Promise.all([checksum(sourceUrl), checksum(target)]);
+    const contentMatch = cs1 === cs2;
+    if (!contentMatch) allMatch = false;
+    log.info(
+      { sourceChecksum: cs1.slice(0, 16), restoredChecksum: cs2.slice(0, 16), match: contentMatch },
+      "content checksum over 5000 observation rows",
+    );
 
     log.info(
       { verified: allMatch },
