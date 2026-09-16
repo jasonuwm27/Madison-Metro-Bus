@@ -45,11 +45,38 @@ const run = promisify(execFile);
 
 interface Shard {
   localPath: string;
-  /** Remote-relative key: feed/date/hour, e.g. trips/2026-09-16/2026-09-16T17.ndjson.gz */
+  /** Remote key in Drive layout: feed/YYYY/MM/DD/HH.ndjson.gz */
   key: string;
   bytes: number;
   mtimeMs: number;
   partial: boolean;
+}
+
+/**
+ * Translate a local shard path into the Drive layout.
+ *
+ * Local:  trips/2026-09-16/2026-09-16T17.ndjson.gz
+ * Drive:  trips/2026/09/16/17.ndjson.gz
+ *
+ * The nested form keeps directory listings small as the archive grows: a flat
+ * year of hourly shards is 8,760 entries in one folder, which Drive paginates
+ * badly and which makes a targeted replay ("give me March") require listing
+ * everything. Splitting on Y/M/D means any prefix query touches a few dozen
+ * entries. The hour is UTC, matching the shard's own naming.
+ *
+ * Returns null for anything that does not match the expected shape, so an
+ * unrecognised file is skipped loudly rather than uploaded to a wrong path.
+ */
+export function toDriveKey(localRelative: string): string | null {
+  const parts = localRelative.split("/");
+  if (parts.length !== 3) return null;
+  const [feed, , filename] = parts;
+  if (feed === undefined || filename === undefined) return null;
+
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})\.ndjson\.(gz|br)$/.exec(filename);
+  if (m === null) return null;
+  const [, year, month, day, hour, ext] = m;
+  return `${feed}/${year}/${month}/${day}/${hour}.ndjson.${ext}`;
 }
 
 interface RemoteFile {
@@ -107,7 +134,10 @@ async function rclone(args: string[], log: Logger): Promise<string> {
   }
 }
 
-async function collectShards(root: string): Promise<Shard[]> {
+async function collectShards(
+  root: string,
+  unrecognised: string[],
+): Promise<Shard[]> {
   const found: Shard[] = [];
   const walk = async (dir: string): Promise<void> => {
     let entries;
@@ -125,14 +155,21 @@ async function collectShards(root: string): Promise<Shard[]> {
       }
       if (!/\.ndjson\.(gz|br)(\.partial.*)?$/.test(entry.name)) continue;
       const info = await stat(path);
+      const localRelative = relative(root, path).split(sep).join("/");
+      const isPartial = entry.name.includes(".partial");
+      const key = isPartial ? localRelative : toDriveKey(localRelative);
+      if (key === null) {
+        unrecognised.push(localRelative);
+        continue;
+      }
       found.push({
         localPath: path,
-        key: relative(root, path).split(sep).join("/"),
+        key,
         bytes: info.size,
         mtimeMs: info.mtimeMs,
         // Anything still .partial (including a rotated-aside .partial.<ts>)
         // was never finalised and may be truncated mid-record.
-        partial: entry.name.includes(".partial"),
+        partial: isPartial,
       });
     }
   };
@@ -172,7 +209,8 @@ async function main(): Promise<void> {
   const doVerify = flag("verify");
   const pruneDays = Number(arg("prune-days") ?? "90");
 
-  const all = await collectShards(root);
+  const unrecognised: string[] = [];
+  const all = await collectShards(root, unrecognised);
   const shards = all.filter((s) => !s.partial);
   const partials = all.length - shards.length;
 
@@ -186,6 +224,14 @@ async function main(): Promise<void> {
     },
     "archive scan complete",
   );
+  if (unrecognised.length > 0) {
+    // Never guess a remote path. A file whose name does not parse is left
+    // local and reported, rather than being uploaded somewhere arbitrary.
+    log.warn(
+      { count: unrecognised.length, examples: unrecognised.slice(0, 3) },
+      "files did not match the expected shard naming and were NOT uploaded",
+    );
+  }
   if (partials > 0) {
     log.warn(
       { partials },
@@ -207,12 +253,28 @@ async function main(): Promise<void> {
     "upload plan",
   );
 
-  if (missing.length > 0 && !dryRun) {
-    // `copy`, never `sync`. See the header comment -- sync would mirror local
-    // prunes into Drive and eat the archive from the oldest end.
-    await rclone(["copy", root, remote, "--include", "*.ndjson.gz", "--include", "*.ndjson.br", "--progress=false", "--stats=0"], log);
-  } else if (dryRun) {
-    for (const s of missing) console.log(`  would upload  ${s.key}  ${(s.bytes / 1024).toFixed(0)}KB`);
+  if (dryRun) {
+    for (const s of missing) {
+      console.log(`  would upload  ${s.key}  ${(s.bytes / 1024).toFixed(0)}KB`);
+    }
+  } else {
+    // `copyto` per file, not `copy` of the tree, because the Drive layout
+    // (feed/YYYY/MM/DD/HH) differs from the local one (feed/YYYY-MM-DD/...).
+    //
+    // Still `copyto` and never `sync`: sync mirrors the destination to the
+    // source, so combined with the local pruner below it would delete remote
+    // shards whose local copies had aged out -- eating the only backup from
+    // the oldest end forward. Every rclone verb used here only ever adds.
+    for (const shard of missing) {
+      await rclone(
+        ["copyto", shard.localPath, `${remote}/${shard.key}`, "--stats=0"],
+        log,
+      );
+      log.info(
+        { key: shard.key, kilobytes: Math.round(shard.bytes / 1024) },
+        "shard uploaded",
+      );
+    }
   }
 
   // ---- confirm, by hash --------------------------------------------------
