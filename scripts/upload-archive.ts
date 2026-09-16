@@ -1,41 +1,61 @@
-import { createReadStream } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
-import { HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { createReadStream } from "node:fs";
+import { readdir, stat, unlink } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { join, relative, sep } from "node:path";
 import { loadConfig } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
+import type { Logger } from "../src/logger.js";
+
+const run = promisify(execFile);
 
 /**
- * Upload local archive shards to R2.
+ * Back the archive up to Google Drive via rclone, and prune the local cache
+ * only once a shard is provably safe remotely.
  *
- *   pnpm upload-archive                    # upload everything not already there
- *   pnpm upload-archive --dir=C:\bus-archive
- *   pnpm upload-archive --dry-run          # list what would be sent
- *   pnpm upload-archive --include-partial  # also send unfinalised .partial shards
+ *   pnpm upload-archive                  # upload new shards
+ *   pnpm upload-archive --prune          # ...then prune local shards >90d old
+ *   pnpm upload-archive --dry-run        # show what would happen, change nothing
+ *   pnpm upload-archive --verify         # re-download a sample and byte-compare
+ *   pnpm upload-archive --prune-days=90
  *
- * WHY THIS EXISTS
- * Collection started on the laptop on 2026-09-15 and moved to the VM on
- * 2026-09-16. Those laptop shards are the only copy of that window, and the
- * feeds cannot be re-fetched for a past moment. This makes the two eras one
- * continuous history in a single bucket.
+ * STORAGE MODEL
+ * Google Drive is permanent and authoritative: 2TB against ~5GB/month is
+ * decades of runway, so nothing there is ever expired or pruned. The VM's
+ * local disk is a hot cache, pruned at 90 days to stay inside Oracle's free
+ * block storage.
  *
- * IDEMPOTENT. Keys are derived from the shard's own path (feed/date/hour), so
- * re-running skips anything already present with a matching size. Run it as
- * often as you like; the laptop and the VM can both target the same bucket
- * without stepping on each other, because their hours never overlap for a
- * given feed.
+ * WHY `rclone copy` AND NEVER `rclone sync`
+ * `sync` makes the destination mirror the source, which means it DELETES
+ * remote files that are missing locally. Combined with a local pruner that is
+ * deliberately removing old files, `sync` would propagate every prune straight
+ * into the only backup and quietly destroy the archive from the oldest end
+ * forward. `copy` only ever adds. This is the single most important line in
+ * this file.
  *
- * SAFETY. This never deletes a local file. Verification is by remote size
- * against local size -- a truncated upload therefore re-uploads rather than
- * being mistaken for done.
+ * PRUNE SAFETY
+ * A shard is deletable locally only when rclone confirms a remote file at the
+ * same path whose **MD5 matches the local file**. Existence alone is not
+ * enough: an upload interrupted mid-stream leaves a short remote file, and
+ * deleting the good local copy against a truncated remote one is precisely the
+ * failure that destroyed the 2026-09-15 archive, one layer up. Drive supplies
+ * MD5 for every file, so there is no reason to settle for a size check.
  */
 
 interface Shard {
   localPath: string;
+  /** Remote-relative key: feed/date/hour, e.g. trips/2026-09-16/2026-09-16T17.ndjson.gz */
   key: string;
   bytes: number;
+  mtimeMs: number;
   partial: boolean;
+}
+
+interface RemoteFile {
+  Path: string;
+  Size: number;
+  Hashes?: { md5?: string } | undefined;
 }
 
 const arg = (name: string): string | undefined =>
@@ -43,10 +63,52 @@ const arg = (name: string): string | undefined =>
 const flag = (name: string): boolean =>
   process.argv.some((a) => a === `--${name}` || a.startsWith(`--${name}=`));
 
-/** Collect shards, deriving the object key from the path layout the archive writes. */
+/**
+ * Pacing flags, applied to every rclone invocation.
+ *
+ * Drive's practical ceiling is ~10 transactions/sec and rclone is itself
+ * limited to roughly 2 files/sec against it. Daily volume here is 72 small
+ * shards (~170MB), which is nowhere near the ~750GiB/day upload cap -- but a
+ * first bulk backfill of months of accumulated shards is exactly where 403
+ * rateLimitExceeded shows up, so the pacing is set for that case rather than
+ * the steady state.
+ *
+ * --drive-stop-on-upload-limit makes a quota breach a hard error instead of a
+ * partial transfer. That matters enormously here: the pruner trusts remote
+ * state, so a sync that half-fails silently is far more dangerous than one
+ * that stops.
+ */
+const RCLONE_PACING = [
+  "--tpslimit", "4",
+  "--tpslimit-burst", "8",
+  "--transfers", "4",
+  "--checkers", "8",
+  "--drive-stop-on-upload-limit",
+  "--retries", "3",
+  "--low-level-retries", "10",
+  "--drive-chunk-size", "32M",
+];
+
+async function rclone(args: string[], log: Logger): Promise<string> {
+  try {
+    const { stdout } = await run("rclone", [...args, ...RCLONE_PACING], {
+      maxBuffer: 64 * 1024 * 1024,
+      // Never inherit a shell; args are passed as an array so paths with
+      // spaces need no quoting and nothing is interpolated.
+    });
+    return stdout;
+  } catch (error) {
+    const e = error as { stderr?: string; message?: string };
+    // rclone puts the useful detail on stderr. Surface it, but never echo the
+    // config file, which holds the OAuth refresh token.
+    const detail = (e.stderr ?? e.message ?? "").split("\n").slice(0, 6).join("\n");
+    log.error({ args: args.filter((a) => !a.includes("token")) }, `rclone failed: ${detail}`);
+    throw new Error(`rclone ${args[0]} failed`);
+  }
+}
+
 async function collectShards(root: string): Promise<Shard[]> {
   const found: Shard[] = [];
-
   const walk = async (dir: string): Promise<void> => {
     let entries;
     try {
@@ -57,29 +119,46 @@ async function collectShards(root: string): Promise<Shard[]> {
     for (const entry of entries) {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) {
-        // Skip the GTFS extraction scratch dir -- it is regenerable and large.
         if (entry.name === ".gtfs-cache") continue;
         await walk(path);
         continue;
       }
-      if (!/\.ndjson\.(gz|br)(\.partial)?$/.test(entry.name)) continue;
-
-      const { size } = await stat(path);
-      // Key mirrors the local layout (feed/date/file) so VM-written and
-      // laptop-written shards interleave naturally in one bucket. Backslashes
-      // are normalised because this runs on Windows.
-      const key = relative(root, path).split(sep).join("/");
+      if (!/\.ndjson\.(gz|br)(\.partial.*)?$/.test(entry.name)) continue;
+      const info = await stat(path);
       found.push({
         localPath: path,
-        key,
-        bytes: size,
-        partial: entry.name.endsWith(".partial"),
+        key: relative(root, path).split(sep).join("/"),
+        bytes: info.size,
+        mtimeMs: info.mtimeMs,
+        // Anything still .partial (including a rotated-aside .partial.<ts>)
+        // was never finalised and may be truncated mid-record.
+        partial: entry.name.includes(".partial"),
       });
     }
   };
-
   await walk(root);
   return found.sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/** MD5 of a local file, to compare against the hash Drive reports. */
+function md5(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("md5");
+    const stream = createReadStream(path);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on("error", reject);
+  });
+}
+
+/** Everything currently in the Drive folder, keyed by remote path. */
+async function listRemote(remote: string, log: Logger): Promise<Map<string, RemoteFile>> {
+  const stdout = await rclone(
+    ["lsjson", remote, "--recursive", "--files-only", "--hash"],
+    log,
+  );
+  const files = JSON.parse(stdout || "[]") as RemoteFile[];
+  return new Map(files.map((f) => [f.Path, f]));
 }
 
 async function main(): Promise<void> {
@@ -87,143 +166,199 @@ async function main(): Promise<void> {
   const log = createLogger(cfg);
 
   const root = arg("dir") ?? cfg.archive.dir;
+  const remote = arg("remote") ?? cfg.archive.remote;
   const dryRun = flag("dry-run");
-  const includePartial = flag("include-partial");
+  const doPrune = flag("prune");
+  const doVerify = flag("verify");
+  const pruneDays = Number(arg("prune-days") ?? "90");
 
   const all = await collectShards(root);
-  const shards = includePartial ? all : all.filter((s) => !s.partial);
-  const skippedPartial = all.length - shards.length;
+  const shards = all.filter((s) => !s.partial);
+  const partials = all.length - shards.length;
 
-  const totalBytes = shards.reduce((n, s) => n + s.bytes, 0);
   log.info(
     {
       root,
+      remote,
       shards: shards.length,
-      megabytes: +(totalBytes / 1e6).toFixed(1),
-      skippedPartial,
+      skippedPartial: partials,
+      megabytes: +(shards.reduce((n, s) => n + s.bytes, 0) / 1e6).toFixed(1),
     },
     "archive scan complete",
   );
-
-  if (skippedPartial > 0) {
-    // A .partial shard is one the worker had open when it stopped. It is valid
-    // compressed data but the stream was never finalised, so it may be
-    // truncated mid-record. Excluded by default rather than silently shipping
-    // a shard a replayer might choke on.
+  if (partials > 0) {
     log.warn(
-      { skippedPartial },
-      "unfinalised .partial shards skipped; pass --include-partial to send them",
+      { partials },
+      "unfinalised .partial shards skipped -- an open or interrupted stream is " +
+        "not safe to treat as a backup",
     );
   }
 
-  if (shards.length === 0) {
-    log.info("nothing to upload");
-    return;
-  }
+  const before = await listRemote(remote, log);
 
-  if (dryRun) {
-    for (const s of shards) {
-      console.log(`  ${s.key}  ${(s.bytes / 1024).toFixed(0)}KB`);
-    }
-    log.info("dry run: nothing uploaded");
-    return;
-  }
-
-  if (cfg.archive.sink !== "r2") {
-    throw new Error(
-      "ARCHIVE_SINK must be 'r2' to upload, and R2_* credentials must be set. " +
-        "Use --dry-run to preview without credentials.",
-    );
-  }
-
-  const client = new S3Client({
-    region: "auto",
-    endpoint: `https://${cfg.archive.r2.accountId}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: cfg.archive.r2.accessKeyId,
-      secretAccessKey: cfg.archive.r2.secretAccessKey,
-    },
+  // ---- upload ------------------------------------------------------------
+  const missing = shards.filter((s) => {
+    const r = before.get(s.key);
+    return r === undefined || r.Size !== s.bytes;
   });
-  const bucket = cfg.archive.r2.bucket;
-
-  let uploaded = 0;
-  let skipped = 0;
-  let failed = 0;
-  let bytesSent = 0;
-
-  for (const shard of shards) {
-    // Skip if an object of the same size is already there. Size rather than
-    // ETag because R2 multipart ETags are not plain MD5, so an ETag compare
-    // would produce spurious re-uploads on larger shards.
-    try {
-      const head = await client.send(
-        new HeadObjectCommand({ Bucket: bucket, Key: shard.key }),
-      );
-      if (head.ContentLength === shard.bytes) {
-        skipped += 1;
-        continue;
-      }
-      log.warn(
-        { key: shard.key, remote: head.ContentLength, local: shard.bytes },
-        "size mismatch; re-uploading",
-      );
-    } catch {
-      // Not found -- fall through and upload.
-    }
-
-    try {
-      await client.send(
-        new PutObjectCommand({
-          Bucket: bucket,
-          Key: shard.key,
-          Body: createReadStream(shard.localPath),
-          ContentLength: shard.bytes,
-          ContentType: "application/x-ndjson",
-          ContentEncoding: shard.key.endsWith(".br") ? "br" : "gzip",
-          Metadata: {
-            "origin-host": process.env["COMPUTERNAME"] ?? process.env["HOSTNAME"] ?? "unknown",
-            "sha256-prefix": await sha256Prefix(shard.localPath),
-          },
-        }),
-      );
-      uploaded += 1;
-      bytesSent += shard.bytes;
-      log.info(
-        { key: shard.key, kilobytes: Math.round(shard.bytes / 1024) },
-        "shard uploaded",
-      );
-    } catch (error) {
-      failed += 1;
-      // Keep going: one bad shard must not abandon the rest of the backfill.
-      log.error({ err: error, key: shard.key }, "shard upload failed");
-    }
-  }
 
   log.info(
-    {
-      uploaded,
-      alreadyPresent: skipped,
-      failed,
-      megabytesSent: +(bytesSent / 1e6).toFixed(1),
-    },
-    "archive upload complete",
+    { alreadyRemote: shards.length - missing.length, toUpload: missing.length },
+    "upload plan",
   );
 
-  if (failed > 0) process.exitCode = 1;
+  if (missing.length > 0 && !dryRun) {
+    // `copy`, never `sync`. See the header comment -- sync would mirror local
+    // prunes into Drive and eat the archive from the oldest end.
+    await rclone(["copy", root, remote, "--include", "*.ndjson.gz", "--include", "*.ndjson.br", "--progress=false", "--stats=0"], log);
+  } else if (dryRun) {
+    for (const s of missing) console.log(`  would upload  ${s.key}  ${(s.bytes / 1024).toFixed(0)}KB`);
+  }
+
+  // ---- confirm, by hash --------------------------------------------------
+  const after = dryRun ? before : await listRemote(remote, log);
+  const confirmed = new Set<string>();
+  let mismatched = 0;
+
+  for (const shard of shards) {
+    const r = after.get(shard.key);
+    if (r === undefined) continue;
+    if (r.Size !== shard.bytes) {
+      mismatched += 1;
+      log.warn({ key: shard.key, localBytes: shard.bytes, remoteBytes: r.Size }, "remote size mismatch");
+      continue;
+    }
+    const remoteMd5 = r.Hashes?.md5;
+    if (remoteMd5 === undefined) {
+      // No hash offered: refuse to treat as confirmed rather than downgrading
+      // silently to a size-only check.
+      log.warn({ key: shard.key }, "remote reports no MD5; not counting as confirmed");
+      continue;
+    }
+    if (remoteMd5.toLowerCase() !== (await md5(shard.localPath))) {
+      mismatched += 1;
+      log.error({ key: shard.key }, "remote MD5 does NOT match local -- will re-upload next run");
+      continue;
+    }
+    confirmed.add(shard.key);
+  }
+
+  const remoteBytes = [...after.values()].reduce((n, f) => n + (f.Size ?? 0), 0);
+  log.info(
+    {
+      uploaded: dryRun ? 0 : Math.max(0, after.size - before.size),
+      confirmedByHash: confirmed.size,
+      mismatched,
+      remoteFiles: after.size,
+      remoteGigabytes: +(remoteBytes / 1e9).toFixed(3),
+    },
+    "drive sync complete",
+  );
+
+  // ---- optional deep verification ---------------------------------------
+  if (doVerify) await verifySample(remote, shards, confirmed, log);
+
+  // ---- prune, gated on hash confirmation --------------------------------
+  if (doPrune) {
+    const cutoff = Date.now() - pruneDays * 86_400_000;
+    const eligible = shards.filter((s) => s.mtimeMs < cutoff);
+    let pruned = 0;
+    let withheld = 0;
+
+    for (const shard of eligible) {
+      // Age alone is never sufficient. Only a hash-confirmed remote copy makes
+      // the local file redundant.
+      if (!confirmed.has(shard.key)) {
+        withheld += 1;
+        log.warn(
+          { key: shard.key },
+          "past retention but NOT confirmed in Drive -- keeping local copy",
+        );
+        continue;
+      }
+      if (dryRun) {
+        console.log(`  would prune   ${shard.key}`);
+        continue;
+      }
+      await unlink(shard.localPath);
+      pruned += 1;
+    }
+    log.info({ pruneDays, eligible: eligible.length, pruned, withheld }, "local prune complete");
+  }
+
+  if (mismatched > 0) process.exitCode = 1;
 }
 
-/** First 16 hex chars of the file's SHA-256, stored as object metadata. */
-async function sha256Prefix(path: string): Promise<string> {
-  return await new Promise((resolve, reject) => {
-    const hash = createHash("sha256");
-    const stream = createReadStream(path);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("end", () => resolve(hash.digest("hex").slice(0, 16)));
-    stream.on("error", reject);
-  });
+/**
+ * Pull a shard back out of Drive and byte-compare it.
+ *
+ * `rclone check` compares hashes, which is good but still trusts Drive's own
+ * reported MD5. This downloads the object, decompresses it, and compares the
+ * decoded protobuf payloads against the local shard -- proving the round trip
+ * end to end rather than asserting it.
+ */
+async function verifySample(
+  remote: string,
+  shards: readonly Shard[],
+  confirmed: ReadonlySet<string>,
+  log: Logger,
+): Promise<void> {
+  const target = shards.filter((s) => confirmed.has(s.key)).at(-1);
+  if (target === undefined) {
+    log.warn("nothing confirmed to verify");
+    return;
+  }
+
+  const { gunzipSync, brotliDecompressSync } = await import("node:zlib");
+  const { readFileSync } = await import("node:fs");
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+
+  const scratch = await mkdtemp(join(tmpdir(), "archive-verify-"));
+  try {
+    await rclone(["copyto", `${remote}/${target.key}`, join(scratch, "roundtrip"), "--stats=0"], log);
+
+    const localRaw = readFileSync(target.localPath);
+    const remoteRaw = readFileSync(join(scratch, "roundtrip"));
+    const decode = (b: Buffer): Buffer =>
+      target.key.endsWith(".br") ? brotliDecompressSync(b) : gunzipSync(b);
+
+    const parse = (b: Buffer): { count: number; payloads: string[] } => {
+      const lines = decode(b).toString("utf8").split("\n").filter(Boolean);
+      return {
+        count: lines.length,
+        payloads: lines.map((l) => (JSON.parse(l) as { payload_b64: string }).payload_b64),
+      };
+    };
+
+    const a = parse(localRaw);
+    const b = parse(remoteRaw);
+
+    const bytesIdentical = localRaw.equals(remoteRaw);
+    const payloadsIdentical =
+      a.count === b.count && a.payloads.every((p, i) => p === b.payloads[i]);
+    const totalPayloadBytes = a.payloads.reduce(
+      (n, p) => n + Buffer.from(p, "base64").byteLength,
+      0,
+    );
+
+    log.info(
+      {
+        key: target.key,
+        compressedBytesIdentical: bytesIdentical,
+        records: a.count,
+        decodedPayloadsIdentical: payloadsIdentical,
+        protobufBytesVerified: totalPayloadBytes,
+      },
+      payloadsIdentical && bytesIdentical
+        ? "ROUND TRIP VERIFIED: Drive copy is byte-identical after decompression"
+        : "ROUND TRIP FAILED",
+    );
+    if (!payloadsIdentical || !bytesIdentical) process.exitCode = 1;
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
 }
-
-
 
 main().catch((error: unknown) => {
   console.error(error);

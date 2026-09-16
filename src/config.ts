@@ -88,6 +88,9 @@ const EnvSchema = z.object({
   BACKOFF_MAX_MS: intFromEnv(120_000),
 
   ARCHIVE_SINK: z.enum(["local", "r2"]).default("local"),
+  // rclone remote for the permanent archive, e.g. "gdrive:bus-archive".
+  ARCHIVE_REMOTE: z.string().default("gdrive:bus-archive"),
+  ARCHIVE_PRUNE_DAYS: intFromEnv(90),
   ARCHIVE_COMPRESSION: z.enum(["gzip", "brotli"]).default("gzip"),
   ARCHIVE_DIR: z.string().default(DEFAULT_ARCHIVE_DIR),
   GTFS_CACHE_DIR: z.string().default(DEFAULT_GTFS_CACHE_DIR),
@@ -136,6 +139,8 @@ export type Config = {
     sink: "local" | "r2";
     compression: "gzip" | "brotli";
     dir: string;
+    remote: string;
+    pruneDays: number;
     r2: {
       accountId: string;
       bucket: string;
@@ -217,6 +222,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       sink: e.ARCHIVE_SINK,
       compression: e.ARCHIVE_COMPRESSION,
       dir: e.ARCHIVE_DIR,
+      remote: e.ARCHIVE_REMOTE,
+      pruneDays: e.ARCHIVE_PRUNE_DAYS,
       r2: {
         accountId: e.R2_ACCOUNT_ID,
         bucket: e.R2_BUCKET,
