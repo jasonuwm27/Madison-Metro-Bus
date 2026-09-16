@@ -243,9 +243,27 @@ async function main(): Promise<void> {
   const before = await listRemote(remote, log);
 
   // ---- upload ------------------------------------------------------------
+  //
+  // Selection is by MD5, not by size. Comparing sizes alone leaves a corrupted
+  // remote file of the right length permanently un-repaired: it is excluded
+  // from the upload set as "already there", then fails hash confirmation, then
+  // is excluded again on the next run. The shard would be withheld from
+  // pruning forever while its backup stayed silently wrong -- the archive
+  // reporting a problem it never fixes.
+  //
+  // Hashing every local shard costs a read per file. At 72 shards/day that is
+  // trivial, and it is the only way the repair loop actually closes.
+  const localMd5 = new Map<string, string>();
+  for (const shard of shards) localMd5.set(shard.key, await md5(shard.localPath));
+
   const missing = shards.filter((s) => {
     const r = before.get(s.key);
-    return r === undefined || r.Size !== s.bytes;
+    if (r === undefined) return true;
+    if (r.Size !== s.bytes) return true;
+    const remoteHash = r.Hashes?.md5?.toLowerCase();
+    // No remote hash: re-upload rather than assume it is fine.
+    if (remoteHash === undefined) return true;
+    return remoteHash !== localMd5.get(s.key);
   });
 
   log.info(
@@ -297,7 +315,8 @@ async function main(): Promise<void> {
       log.warn({ key: shard.key }, "remote reports no MD5; not counting as confirmed");
       continue;
     }
-    if (remoteMd5.toLowerCase() !== (await md5(shard.localPath))) {
+    const localHash = localMd5.get(shard.key) ?? (await md5(shard.localPath));
+    if (remoteMd5.toLowerCase() !== localHash) {
       mismatched += 1;
       log.error({ key: shard.key }, "remote MD5 does NOT match local -- will re-upload next run");
       continue;
@@ -308,7 +327,7 @@ async function main(): Promise<void> {
   const remoteBytes = [...after.values()].reduce((n, f) => n + (f.Size ?? 0), 0);
   log.info(
     {
-      uploaded: dryRun ? 0 : Math.max(0, after.size - before.size),
+      uploaded: dryRun ? 0 : missing.length,
       confirmedByHash: confirmed.size,
       mismatched,
       remoteFiles: after.size,
