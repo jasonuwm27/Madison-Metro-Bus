@@ -1,4 +1,4 @@
-import { createWriteStream, existsSync, mkdirSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, renameSync } from "node:fs";
 import { rename, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { constants, createBrotliCompress, createGzip } from "node:zlib";
@@ -162,10 +162,32 @@ export class HourlyNdjsonArchive implements ArchiveSink {
     const filename = `${hourKey.replace(/:/g, "")}.ndjson.${extension}`;
     // Written as .partial so an interrupted process never leaves a truncated
     // shard that looks complete to the uploader or to a replay.
-    const path = join(dir, `${filename}.partial`);
+    const basePath = join(dir, `${filename}.partial`);
     const finalPath = join(dir, filename);
 
-    const file = createWriteStream(path, { flags: "a" });
+    // "wx" -- create exclusively, never append.
+    //
+    // This was "a", which corrupted every shard written on 2026-09-15: a worker
+    // restarting inside the same hour reopened the same .partial file and piped
+    // a SECOND gzip stream onto the end of an unfinalised first one. Concatenated
+    // gzip members are legal, but a truncated member followed by another is not,
+    // and the whole shard became undecompressable. Restarts are routine -- a
+    // crash, a deploy, a reboot -- so this was guaranteed to happen.
+    //
+    // With "wx" a collision is surfaced instead of silently corrupting: the
+    // existing shard is rotated aside with a suffix and a fresh stream starts,
+    // so each file holds exactly one complete gzip member.
+    let path = basePath;
+    if (existsSync(path)) {
+      const salvaged = `${basePath}.${Date.now()}`;
+      renameSync(path, salvaged);
+      this.#log.warn(
+        { shard: filename, salvaged },
+        "an unfinalised shard already existed for this hour (previous run ended " +
+          "abruptly); moved aside rather than appending, which would corrupt both",
+      );
+    }
+    const file = createWriteStream(path, { flags: "wx" });
     const compressor = createCompressor(this.#compression);
     compressor.pipe(file);
 

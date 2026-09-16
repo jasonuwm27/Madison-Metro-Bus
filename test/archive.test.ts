@@ -214,6 +214,40 @@ describe("HourlyNdjsonArchive", () => {
     );
   });
 
+  it("never appends a second gzip stream onto an interrupted shard", async () => {
+    // Regression for the bug that destroyed every shard written on 2026-09-15.
+    // The writer used flags:"a", so a worker restarting inside the same hour
+    // piped a fresh gzip stream onto an unfinalised one. The result decompressed
+    // to "invalid block type" / "unexpected end of file" and the raw bytes --
+    // the one thing that cannot be re-collected -- were unrecoverable.
+    const dir = tempDir();
+    const when = at("2026-09-15T19:10:00Z");
+
+    // First run: writes, then dies without closing (simulating SIGKILL).
+    const first = new HourlyNdjsonArchive({ dir, logger: silent });
+    await first.write({
+      feed: "trips", fetchedAtMs: when, httpStatus: 200,
+      feedTimestampMs: null, attempts: 1, payload: new Uint8Array([1, 2, 3]),
+    });
+
+    // Second run: same feed, same UTC hour, same target filename.
+    const second = new HourlyNdjsonArchive({ dir, logger: silent });
+    await second.write({
+      feed: "trips", fetchedAtMs: when + 60_000, httpStatus: 200,
+      feedTimestampMs: null, attempts: 1, payload: new Uint8Array([4, 5, 6]),
+    });
+    await second.close();
+
+    // The finalised shard must decompress cleanly and contain only run two.
+    const finalised = (await findShards(dir)).filter((f) => f.endsWith(".ndjson.gz"));
+    expect(finalised).toHaveLength(1);
+    const records = readShard(finalised[0] ?? "");
+    expect(records).toHaveLength(1);
+    expect(Buffer.from(String(records[0]?.["payload_b64"]), "base64")).toEqual(
+      Buffer.from(new Uint8Array([4, 5, 6])),
+    );
+  });
+
   it("retains the local shard when the upload fails", async () => {
     // The critical property: a failed upload must degrade to "still on disk",
     // never to "gone". It must also not take the worker down.
