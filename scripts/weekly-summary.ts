@@ -25,7 +25,7 @@ interface Check {
   label: string;
   value: string;
   ok: boolean;
-  note?: string;
+  note?: string | undefined;
 }
 
 const bytes = (n: number): string =>
