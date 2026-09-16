@@ -374,6 +374,25 @@ happens. Fix is to create a personal OAuth client ID
 `client_secret` to `~/.config/rclone/rclone.conf`. Not urgent, but it is a
 dated failure, not a hypothetical one.
 
+## MEASURED storage cost (2026-09-16) -- supersedes earlier estimates
+
+Measured against a real partitioned table, not estimated:
+
+| | |
+|---|---|
+| Bytes/row incl. indexes | **307** (earlier estimate: ~220) |
+| Growth | **53 MB/day**, ~370 MB/week |
+| Supabase 500MB cap | reached in **~8 days** from 2026-09-16 |
+| 15-day eviction steady state | **792 MB** of observations + 62 MB static |
+
+**15-day eviction does NOT fit inside Supabase's free tier.** The retention
+figure was chosen against the lower estimate. On Supabase the ceiling is
+roughly 7 days of observations; only the move to the VM makes long retention
+possible. This makes the Postgres migration time-critical, not optional.
+
+static_stop_times is 62.1 MB per feed version and does not grow with
+collection, but a new Metro feed version adds another copy.
+
 ## Known gaps / next steps
 
 - **Departure-only stops are skipped.** 149 of 6,035 in the sample — trip origin
