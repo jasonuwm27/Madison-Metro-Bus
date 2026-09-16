@@ -33,27 +33,38 @@ import { localDateString } from "./util/time.js";
  */
 
 class Shutdown {
-  #resolve: (() => void) | null = null;
+  // A SET of waiters, not a single handle.
+  //
+  // This held one `#resolve`, which silently broke shutdown: three poll loops
+  // sleep concurrently, and each call to sleep() overwrote the previous loop's
+  // resolver. On SIGTERM only the most recent sleeper woke; the others ran out
+  // their full timer. With the alerts loop sleeping 300s against a
+  // TimeoutStopSec of 60, systemd escalated to SIGKILL on every stop -- killing
+  // the process mid-write and truncating the very archive shards this design
+  // treats as the record of record.
+  //
+  // A Set wakes every waiter, so the slowest loop to exit is bounded by how
+  // long its in-flight poll takes, not by its poll interval.
+  readonly #waiters = new Set<() => void>();
   stopping = false;
 
   signal(): void {
     this.stopping = true;
-    this.#resolve?.();
+    for (const wake of [...this.#waiters]) wake();
+    this.#waiters.clear();
   }
 
-  /** Sleep that returns early when shutdown is requested. */
+  /** Sleep that returns immediately once shutdown is requested. */
   async sleep(ms: number): Promise<void> {
     if (this.stopping) return;
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        this.#resolve = null;
-        resolve();
-      }, ms);
-      this.#resolve = () => {
+      const wake = (): void => {
         clearTimeout(timer);
-        this.#resolve = null;
+        this.#waiters.delete(wake);
         resolve();
       };
+      const timer = setTimeout(wake, ms);
+      this.#waiters.add(wake);
     });
   }
 }
