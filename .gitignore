@@ -8,10 +8,13 @@ dist/
 # By default these live OUTSIDE the repo (C:\bus-archive on Windows), but these
 # patterns stay so that pointing ARCHIVE_DIR back inside the tree cannot
 # accidentally commit gigabytes of shards. Matches at any depth.
-archive/
-**/archive/
-bus-archive/
-data/
+# Anchored to the repo root so it cannot match src/archive/, which is SOURCE.
+# An earlier unanchored `**/archive/` silently excluded src/archive/*.ts from
+# the repo -- the push looked fine locally because the files existed on disk,
+# and only failed on a clean clone. Leading slash = repo root only.
+/archive/
+/bus-archive/
+/data/
 *.ndjson.gz
 *.ndjson.br
 *.ndjson.gz.partial
@@ -20,3 +23,13 @@ data/
 # Downloaded GTFS static zips and extracted CSVs.
 .gtfs-cache/
 **/.gtfs-cache/
+
+# SSH keys and other credential material. The repo is public, and a `git add .`
+# would otherwise sweep these in. `.key` was created empty in the project root
+# at one point -- this makes that class of mistake unstageable.
+*.key
+*.pem
+*.ppk
+.key
+id_rsa*
+id_ed25519*
