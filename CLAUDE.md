@@ -393,6 +393,56 @@ possible. This makes the Postgres migration time-critical, not optional.
 static_stop_times is 62.1 MB per feed version and does not grow with
 collection, but a new Metro feed version adds another copy.
 
+## Local Postgres + parallel run (2026-09-17)
+
+Postgres 17.11 on a dedicated 50GB block volume; both workers collecting.
+
+| | |
+|---|---|
+| Volume | `/mnt/pgdata`, UUID `d94a6856-d7f3-499a-8988-ff5e51d6d7e6` |
+| PGDATA | `/mnt/pgdata/17/data` (data checksums on) |
+| Split | Postgres 35GB / archive 12GB / 3GB headroom |
+| Workers | `bus-worker` -> Supabase, `bus-worker-local` -> localhost |
+| Retention | Supabase 10d (`bus-drop`), local 400d (`bus-drop-local`) |
+
+**Device names are NOT stable.** Across one reboot the volume moved
+`sdb` -> `sda` and the boot disk the other way, and `/dev/oracleoci/oraclevd*`
+symlinks vanished. Only the UUID is trustworthy.
+
+**`RequiresMountsFor` is not a guard.** systemd auto-mounts the path to satisfy
+it, and the packaged unit runs `initdb` on an empty PGDATA -- a failed mount
+would create a fresh cluster on the boot disk and serve it while root filled.
+`/usr/local/bin/check-pgdata-volume.sh` (ExecStartPre) asserts mountpoint,
+UUID, marker file and PG_VERSION. Verified: volume unmounted + mount unit
+masked -> Postgres refused to start, zero bytes on the boot disk.
+
+Measured sizing: **294 bytes/row**, 1.29 GB/month observations, ~1 GB/year
+rollups, and the **archive cache is 6.9 GB/month** -- five times hungrier than
+Postgres, which is why the split favours the database.
+
+## Healthchecks (2026-09-17)
+
+`/etc/bus-healthchecks.env`, `root:bushc` 0640; `opc` reads it via the `bushc`
+group. Not world-readable, because a ping URL is a capability -- anyone holding
+it can send "ok" and silence the alert.
+
+`EnvironmentFile=` does NOT work for this: systemd reads it as the service user,
+which cannot read a root-only file, and `Environment=X=${Y}` is stored
+literally rather than expanded. The wrapper sources the file itself.
+
+| Unit | Check |
+|---|---|
+| `bus-archive-sync` | `HC_ARCHIVE` |
+| `bus-backup` | `HC_BACKUP` |
+| `bus-rollup`, `bus-rollup-local` | `HC_ROLLUP` |
+| `bus-partitions` | `HC_PARTITIONS` |
+| weekly summary | `HC_SUMMARY` |
+| **`bus-drop`, `bus-drop-local`** | **UNMONITORED -- `HC_DROP` not created** |
+| **`bus-worker-local`** | **UNMONITORED -- `HC_WORKERLOCAL` not created** |
+
+`bus-drop` silence means Supabase fills without warning. Create those two
+checks and fill the placeholders in the env file.
+
 ## Known gaps / next steps
 
 - **Departure-only stops are skipped.** 149 of 6,035 in the sample — trip origin
