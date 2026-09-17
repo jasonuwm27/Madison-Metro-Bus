@@ -3,12 +3,19 @@ import { createReadStream } from "node:fs";
 import { mkdir, readdir, stat, unlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadConfig } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
 import type { Logger } from "../src/logger.js";
 
 const run = promisify(execFile);
+
+/**
+ * Absolute path to rclone. It installs to /usr/local/bin, which is NOT on PATH
+ * for systemd units or `sudo -u` -- relying on PATH yields ENOENT at runtime.
+ */
+const RCLONE = process.env["RCLONE_BIN"] ?? "/usr/local/bin/rclone";
 
 /**
  * Nightly pg_dump to Google Drive, with generational retention.
@@ -62,7 +69,7 @@ const RCLONE_PACING = [
 
 async function rclone(args: string[], log: Logger): Promise<string> {
   try {
-    const { stdout } = await run("rclone", [...args, ...RCLONE_PACING], {
+    const { stdout } = await run(RCLONE, [...args, ...RCLONE_PACING], {
       maxBuffer: 64 * 1024 * 1024,
     });
     return stdout;
@@ -391,7 +398,22 @@ async function verifyRestore(
   }
 }
 
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exit(1);
-});
+/**
+ * Run only when invoked directly.
+ *
+ * test/retention.test.ts imports selectForRetention from this module, and a
+ * bare main() call meant that import executed the whole backup -- firing a real
+ * pg_dump from the test suite and then process.exit(1) when it failed. Tests
+ * must never reach the network or a database; guarding the entrypoint is what
+ * makes exporting a pure function from a script safe.
+ */
+const invokedDirectly =
+  process.argv[1] !== undefined &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+
+if (invokedDirectly) {
+  main().catch((error: unknown) => {
+    console.error(error);
+    process.exit(1);
+  });
+}

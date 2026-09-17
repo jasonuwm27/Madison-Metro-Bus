@@ -11,6 +11,12 @@ import type { Logger } from "../src/logger.js";
 const run = promisify(execFile);
 
 /**
+ * Absolute path to rclone. It installs to /usr/local/bin, which is NOT on PATH
+ * for systemd units or `sudo -u` -- relying on PATH yields ENOENT at runtime.
+ */
+const RCLONE = process.env["RCLONE_BIN"] ?? "/usr/local/bin/rclone";
+
+/**
  * Back the archive up to Google Drive via rclone, and prune the local cache
  * only once a shard is provably safe remotely.
  *
@@ -118,7 +124,7 @@ const RCLONE_PACING = [
 
 async function rclone(args: string[], log: Logger): Promise<string> {
   try {
-    const { stdout } = await run("rclone", [...args, ...RCLONE_PACING], {
+    const { stdout } = await run(RCLONE, [...args, ...RCLONE_PACING], {
       maxBuffer: 64 * 1024 * 1024,
       // Never inherit a shell; args are passed as an array so paths with
       // spaces need no quoting and nothing is interpolated.

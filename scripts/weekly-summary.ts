@@ -4,8 +4,20 @@ import { statfs } from "node:fs/promises";
 import postgres from "postgres";
 import { loadConfig } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
+import type { Logger } from "../src/logger.js";
 
 const run = promisify(execFile);
+
+/**
+ * Absolute path to rclone.
+ *
+ * rclone installs to /usr/local/bin, which is NOT on PATH for systemd units or
+ * `sudo -u`. Relying on PATH made every rclone call fail with ENOENT, which the
+ * catch blocks below turned into "UNREACHABLE" and "NONE FOUND" -- the summary
+ * reported false failures indistinguishable from a real Drive outage. Resolve
+ * it explicitly and let a genuinely missing binary be loud.
+ */
+const RCLONE = process.env["RCLONE_BIN"] ?? "/usr/local/bin/rclone";
 
 /**
  * One weekly signal that says whether everything is fine.
@@ -31,14 +43,22 @@ interface Check {
 const bytes = (n: number): string =>
   n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${(n / 1e3).toFixed(0)} KB`;
 
-async function rcloneSize(remote: string): Promise<{ bytes: number; count: number }> {
+async function rcloneSize(
+  remote: string,
+  log: Logger,
+): Promise<{ bytes: number; count: number }> {
   try {
-    const { stdout } = await run("rclone", ["size", remote, "--json", "--tpslimit", "4"], {
+    const { stdout } = await run(RCLONE, ["size", remote, "--json", "--tpslimit", "4"], {
       maxBuffer: 16 * 1024 * 1024,
     });
-    const parsed = JSON.parse(stdout) as { bytes: number; count: number };
-    return parsed;
-  } catch {
+    return JSON.parse(stdout) as { bytes: number; count: number };
+  } catch (error) {
+    // Distinguish "rclone is missing/misconfigured" from "Drive is down". Both
+    // produce an unusable answer, but only one is an infrastructure bug, and a
+    // silent catch made them look identical for a whole release.
+    const e = error as { code?: string; stderr?: string; message?: string };
+    const why = e.code === "ENOENT" ? `rclone not found at ${RCLONE}` : (e.stderr ?? e.message ?? "unknown");
+    log.error({ remote, reason: String(why).slice(0, 160) }, "rclone size failed");
     return { bytes: -1, count: -1 };
   }
 }
@@ -100,10 +120,10 @@ async function main(): Promise<void> {
     });
 
     // ---- backups ---------------------------------------------------------
-    const backups = await rcloneSize("gdrive:BusProject/backups");
+    const backups = await rcloneSize("gdrive:BusProject/backups", log);
     let newestBackupAgeH = Number.POSITIVE_INFINITY;
     try {
-      const { stdout } = await run("rclone", ["lsjson", "gdrive:BusProject/backups", "--files-only"], {
+      const { stdout } = await run(RCLONE, ["lsjson", "gdrive:BusProject/backups", "--files-only"], {
         maxBuffer: 16 * 1024 * 1024,
       });
       const files = JSON.parse(stdout) as { Path: string; ModTime: string }[];
@@ -112,8 +132,12 @@ async function main(): Promise<void> {
         .map((f) => new Date(f.ModTime).getTime())
         .sort((a, b) => b - a)[0];
       if (newest !== undefined) newestBackupAgeH = (Date.now() - newest) / 3_600_000;
-    } catch {
-      /* leave as Infinity -> fails the check */
+    } catch (error) {
+      const e = error as { code?: string; message?: string };
+      log.error(
+        { reason: e.code === "ENOENT" ? `rclone not found at ${RCLONE}` : e.message },
+        "could not list backups",
+      );
     }
     checks.push({
       label: "Last DB backup",
@@ -127,7 +151,7 @@ async function main(): Promise<void> {
     });
 
     // ---- archive ---------------------------------------------------------
-    const archive = await rcloneSize("gdrive:BusProject/archive");
+    const archive = await rcloneSize("gdrive:BusProject/archive", log);
     checks.push({
       label: "Archive in Drive",
       value: archive.bytes < 0 ? "UNREACHABLE" : `${bytes(archive.bytes)} in ${archive.count} shards`,
@@ -171,7 +195,7 @@ async function main(): Promise<void> {
     const url = process.env["HC_SUMMARY"];
     if (url !== undefined && url !== "" && !process.argv.includes("--stdout")) {
       const suffix = failing.length === 0 ? "" : "/fail";
-      await run("curl", ["-fsS", "-m", "15", "--retry", "3", "--data-raw", report, `${url}${suffix}`]).catch(
+      await run("/usr/bin/curl", ["-fsS", "-m", "15", "--retry", "3", "--data-raw", report, `${url}${suffix}`]).catch(
         () => log.warn("summary ping failed"),
       );
       log.info({ verdict, failing: failing.length }, "summary sent");
