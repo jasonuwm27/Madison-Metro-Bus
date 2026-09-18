@@ -108,6 +108,11 @@ async function main(): Promise<void> {
     // ---- stop metadata -----------------------------------------------------
     // Only stops that actually have observations. Shipping all 1,659 including
     // ones with no data would put dead ends in the picker.
+    // Headsigns and directions are aggregated ONCE across all stops, then
+    // joined -- not fetched per stop. The obvious correlated-subquery form
+    // rescans static_stop_times (603k rows) once per stop, which at 1,464
+    // stops timed out against Supabase's statement limit. One grouped pass is
+    // the same answer in a single scan.
     const stops = await sql<StopMeta[]>`
       with feed as (
         select id from gtfs_feed_versions
@@ -115,31 +120,32 @@ async function main(): Promise<void> {
         order by loaded_at desc limit 1
       ),
       observed as (
-        select stop_id, sum(n)::int as n, array_agg(distinct route_id order by route_id) as routes
+        select stop_id, sum(n)::int as n,
+               array_agg(distinct route_id order by route_id) as routes
         from stop_route_hour_stats group by stop_id
+      ),
+      stop_trips as (
+        select st.stop_id,
+               array_agg(distinct t.trip_headsign) filter (where t.trip_headsign is not null) as headsigns,
+               array_agg(distinct t.direction_id)  filter (where t.direction_id  is not null) as directions
+        from static_stop_times st
+        join static_trips t
+          on t.trip_id = st.trip_id and t.feed_version_id = st.feed_version_id
+        where st.feed_version_id = (select id from feed)
+          and st.stop_id in (select stop_id from observed)
+        group by st.stop_id
       )
       select
         o.stop_id,
-        coalesce(s.stop_name, o.stop_id)                           as stop_name,
+        coalesce(s.stop_name, o.stop_id)      as stop_name,
         s.stop_lat, s.stop_lon,
-        coalesce((
-          select array_agg(distinct t.trip_headsign order by t.trip_headsign)
-          from static_stop_times st
-          join static_trips t on t.trip_id = st.trip_id and t.feed_version_id = st.feed_version_id
-          where st.stop_id = o.stop_id and st.feed_version_id = (select id from feed)
-            and t.trip_headsign is not null
-        ), '{}')                                                    as headsigns,
-        coalesce((
-          select array_agg(distinct t.direction_id order by t.direction_id)
-          from static_stop_times st
-          join static_trips t on t.trip_id = st.trip_id and t.feed_version_id = st.feed_version_id
-          where st.stop_id = o.stop_id and st.feed_version_id = (select id from feed)
-            and t.direction_id is not null
-        ), '{}')                                                    as directions,
+        coalesce(tr.headsigns,  '{}')         as headsigns,
+        coalesce(tr.directions, '{}')         as directions,
         o.routes, o.n
       from observed o
       left join static_stops s
         on s.stop_id = o.stop_id and s.feed_version_id = (select id from feed)
+      left join stop_trips tr on tr.stop_id = o.stop_id
       order by o.stop_id
     `;
 
