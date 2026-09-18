@@ -33,3 +33,8 @@ dist/
 .key
 id_rsa*
 id_ed25519*
+
+# Exported site data: 1,464 shards regenerated from the database on demand.
+# Derived, bulky, and changes nightly -- it belongs in a deploy artifact, not
+# in git history.
+site/public/data/
