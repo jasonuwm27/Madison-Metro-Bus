@@ -2,3 +2,11 @@
 *.png binary
 *.pb binary
 *.zip binary
+
+# Shell scripts MUST be LF. A CRLF shebang becomes `bash`, which the kernel
+# cannot resolve -- the script dies with "No such file or directory" naming an
+# interpreter that plainly exists. Copying a script to a Linux host with scp
+# bypasses git's normalisation entirely, so this is belt and braces with the
+# deploy step's own dos2unix.
+*.sh text eol=lf
+*.bash text eol=lf
