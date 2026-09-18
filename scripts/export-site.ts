@@ -87,6 +87,67 @@ function wilson(successes: number, total: number, z = 1.96): [number, number] {
 
 const round = (v: number, dp = 1): number => Number(v.toFixed(dp));
 
+/**
+ * Widen the window before suppressing.
+ *
+ * A specific (route, hour, day_type) cell is often too thin to say anything --
+ * 93% of them today. But the same route at the same stop across a 3-hour band,
+ * or across the whole day, frequently is not. Answering a slightly broader
+ * question is far more useful than refusing to answer at all, PROVIDED the
+ * broadening is stated rather than hidden.
+ *
+ * Tried in order, most specific first, stopping at the first level that clears
+ * the threshold:
+ *   exact  -- this hour            "Route 80 at 8am"
+ *   band   -- +/- 1 hour           "Route 80 between 7am and 9am"
+ *   allday -- every hour           "Route 80, weekdays"
+ *
+ * Each result carries its own scope so the UI can say which question it
+ * actually answered. Aggregation is exact at every level because n, n_late and
+ * the sums are algebraic -- no approximation is introduced by widening.
+ */
+type Scope = "exact" | "band" | "allday";
+
+interface Widened {
+  scope: Scope;
+  n: number;
+  nLate: number;
+  meanDelay: number;
+  hours: number[];
+}
+
+function widen(cells: readonly Cell[], route: string, hour: number, dayType: number, minN: number): Widened | null {
+  const pick = (hours: readonly number[]): Widened => {
+    const matched = cells.filter(
+      (c) => c.route_id === route && c.day_type === dayType && hours.includes(c.hour_of_day),
+    );
+    const n = matched.reduce((t, c) => t + c.n, 0);
+    const nLate = matched.reduce((t, c) => t + c.n_late_240, 0);
+    const sum = matched.reduce((t, c) => t + c.mean_delay * c.n, 0);
+    return {
+      scope: "exact",
+      n,
+      nLate,
+      meanDelay: n === 0 ? 0 : sum / n,
+      hours: matched.map((c) => c.hour_of_day).sort((a, b) => a - b),
+    };
+  };
+
+  const exact = { ...pick([hour]), scope: "exact" as Scope };
+  if (exact.n >= minN) return exact;
+
+  const band = { ...pick([hour - 1, hour, hour + 1]), scope: "band" as Scope };
+  if (band.n >= minN) return band;
+
+  const allDay = {
+    ...pick(Array.from({ length: 24 }, (_, i) => i)),
+    scope: "allday" as Scope,
+  };
+  if (allDay.n >= minN) return allDay;
+
+  return null;
+}
+
 /** Postgres dates arrive as full timestamps; the site only ever shows the day. */
 function toDateOnly(value: unknown): string | null {
   if (value === null || value === undefined) return null;
@@ -226,7 +287,28 @@ async function main(): Promise<void> {
         // can never disagree about what counts as enough data.
         cells: cells.map((c) => {
           const [lo, hi] = wilson(c.n_late_240, c.n);
+          // For a cell too thin to speak for itself, precompute the broadest
+          // honest answer so the UI never has to aggregate client-side.
+          const fallback =
+            c.n >= N_PROVISIONAL ? null : widen(cells, c.route_id, c.hour_of_day, c.day_type, N_PROVISIONAL);
+          const fb =
+            fallback === null
+              ? null
+              : (() => {
+                  const [flo, fhi] = wilson(fallback.nLate, fallback.n);
+                  return {
+                    scope: fallback.scope,
+                    n: fallback.n,
+                    nLate: fallback.nLate,
+                    pctLate: round((fallback.nLate / fallback.n) * 100),
+                    pctLateLo: round(flo),
+                    pctLateHi: round(fhi),
+                    mean: round(fallback.meanDelay),
+                    hours: fallback.hours,
+                  };
+                })();
           return {
+            fallback: fb,
             r: c.route_id,
             h: c.hour_of_day,
             d: c.day_type,
