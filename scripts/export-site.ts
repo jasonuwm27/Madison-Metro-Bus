@@ -87,6 +87,13 @@ function wilson(successes: number, total: number, z = 1.96): [number, number] {
 
 const round = (v: number, dp = 1): number => Number(v.toFixed(dp));
 
+/** Postgres dates arrive as full timestamps; the site only ever shows the day. */
+function toDateOnly(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
 async function main(): Promise<void> {
   const cfg = loadConfig();
   const log = createLogger(cfg);
@@ -102,8 +109,28 @@ async function main(): Promise<void> {
     `;
     log.info({ cells: Number(built?.build_stop_route_hour_stats ?? 0) }, "serving tier rebuilt");
 
-    const [summary] = await sql<Record<string, unknown>[]>`select * from dataset_summary`;
-    if (summary === undefined) throw new Error("dataset_summary returned nothing");
+    // count(*) returns bigint, which postgres.js surfaces as a STRING to avoid
+    // precision loss. Left alone these reach the browser as "34232" and every
+    // arithmetic operation silently becomes string concatenation -- a total of
+    // 34232 + 1 renders as "342321". Cast at the boundary, once.
+    const [rawSummary] = await sql<Record<string, unknown>[]>`select * from dataset_summary`;
+    if (rawSummary === undefined) throw new Error("dataset_summary returned nothing");
+    const summary = {
+      firstServiceDate: toDateOnly(rawSummary["first_service_date"]),
+      lastServiceDate: toDateOnly(rawSummary["last_service_date"]),
+      serviceDays: Number(rawSummary["service_days"] ?? 0),
+      totalObservations: Number(rawSummary["total_observations"] ?? 0),
+      stopsWithData: Number(rawSummary["stops_with_data"] ?? 0),
+      routesWithData: Number(rawSummary["routes_with_data"] ?? 0),
+      cellsConfident: Number(rawSummary["cells_confident"] ?? 0),
+      cellsProvisional: Number(rawSummary["cells_provisional"] ?? 0),
+      cellsSparse: Number(rawSummary["cells_sparse"] ?? 0),
+      cellsTotal: Number(rawSummary["cells_total"] ?? 0),
+      // Which day types have any data at all. Weekend cells only exist once a
+      // weekend has elapsed, and the UI must not offer a Saturday tab that
+      // can only ever say "no data".
+      dayTypesPresent: [] as number[],
+    };
 
     // ---- stop metadata -----------------------------------------------------
     // Only stops that actually have observations. Shipping all 1,659 including
@@ -158,6 +185,8 @@ async function main(): Promise<void> {
       order by stop_id, route_id, day_type, hour_of_day
     `;
 
+    summary.dayTypesPresent = [...new Set(allCells.map((c) => c.day_type))].sort();
+
     const byStop = new Map<string, Cell[]>();
     for (const row of allCells) {
       const { stop_id, ...cell } = row;
@@ -174,6 +203,7 @@ async function main(): Promise<void> {
 
     let filesWritten = 0;
     let bytes = 0;
+    const usableStops = new Set<string>();
 
     for (const stop of stops) {
       const cells = byStop.get(stop.stop_id) ?? [];
@@ -187,6 +217,11 @@ async function main(): Promise<void> {
           directions: stop.directions,
         },
         routes: stop.routes,
+        // Whether this stop can show ANY number yet. Today only 26% of stops
+        // can, so the picker needs to say so rather than let people tap into
+        // a dead end.
+        hasUsableData: cells.some((c) => c.n >= N_PROVISIONAL),
+        observations: stop.n,
         // Pre-classified so the UI never re-derives a threshold and the two
         // can never disagree about what counts as enough data.
         cells: cells.map((c) => {
@@ -214,6 +249,7 @@ async function main(): Promise<void> {
         }),
         generatedAt: new Date().toISOString(),
       };
+      if (cells.some((c) => c.n >= N_PROVISIONAL)) usableStops.add(stop.stop_id);
       const json = JSON.stringify(payload);
       await writeFile(join(outRoot, "stops", `${stop.stop_id}.json`), json);
       filesWritten += 1;
@@ -237,6 +273,9 @@ async function main(): Promise<void> {
         headsigns: s.headsigns.slice(0, 4),
         routes: s.routes,
         n: s.n,
+        // Lets the picker mark dead ends instead of letting someone tap a stop
+        // and find nothing. Today this is true for only 26% of stops.
+        usable: usableStops.has(s.stop_id),
       })),
       generatedAt: new Date().toISOString(),
     };
