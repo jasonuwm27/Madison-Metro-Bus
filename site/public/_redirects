@@ -1,0 +1,9 @@
+# Deep links like /stop/1234 have no file behind them on a static host, so the
+# SPA shell must answer for them. 200 (rewrite) rather than 301/302: the URL
+# stays /stop/1234 in the address bar and remains bookmarkable/shareable, which
+# is the whole point of having real paths instead of #hash routing.
+#
+# Data and assets are listed first so they are never swallowed by the catch-all.
+/data/*   /data/:splat   200
+/app.js   /app.js        200
+/stop/*   /index.html    200

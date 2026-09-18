@@ -1,0 +1,15 @@
+# index.json and the shards are rewritten nightly, so they must not be cached
+# hard by the browser -- a student on a stale copy would see yesterday's
+# numbers with today's "updated" timestamp.
+/data/*
+  Cache-Control: public, max-age=300, must-revalidate
+
+# The shell and script are tiny; a short cache keeps deploys visible quickly.
+/index.html
+  Cache-Control: public, max-age=60
+/app.js
+  Cache-Control: public, max-age=300
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin

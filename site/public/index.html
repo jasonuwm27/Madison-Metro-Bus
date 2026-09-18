@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0b1220">
+<title>Is my bus late? — Madison Metro reliability</title>
+<meta name="description" content="How often Madison Metro buses actually run late, by stop, route and time of day. Built from archived GTFS-realtime data.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚌</text></svg>">
+<style>
+/* ---------------------------------------------------------------------------
+   Mobile-first. Every rule here is the phone rule; desktop is the media query
+   at the bottom. The reader is standing outdoors at a bus stop, so: high
+   contrast, large type, tap targets >=48px, and no layout that needs two hands.
+--------------------------------------------------------------------------- */
+:root{
+  --bg:#f6f7f9; --card:#fff; --ink:#0b1220; --muted:#5b6676; --line:#e2e6ec;
+  --accent:#1257d6; --accent-ink:#fff;
+  --late:#c2410c; --ontime:#15803d; --early:#6d28d9;
+  --band:#dbe4f5; --band-ink:#1257d6;
+  --radius:14px;
+  --pad:clamp(16px,4vw,28px);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0b1220; --card:#131c2e; --ink:#eef2f8; --muted:#9aa7b8; --line:#243049;
+    --accent:#6ea2ff; --accent-ink:#06101f;
+    --late:#fb923c; --ontime:#4ade80; --early:#c4b5fd;
+    --band:#1e2c4a; --band-ink:#6ea2ff;
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  overflow-wrap:break-word;
+}
+.wrap{max-width:720px;margin:0 auto;padding:0 var(--pad) 64px}
+h1{font-size:clamp(22px,6vw,30px);line-height:1.2;margin:20px 0 4px;letter-spacing:-.02em}
+h2{font-size:clamp(17px,4.5vw,21px);margin:28px 0 10px;letter-spacing:-.01em}
+p{margin:0 0 12px}
+.muted{color:var(--muted)}
+.small{font-size:13.5px}
+.tiny{font-size:12.5px}
+
+/* ---- dataset banner: the "collecting since" feature, not an apology ---- */
+.banner{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:16px;margin:14px 0 18px;
+}
+.stat-row{display:flex;flex-wrap:wrap;gap:18px;margin-top:10px}
+.stat b{display:block;font-size:22px;line-height:1.15;font-variant-numeric:tabular-nums}
+.stat span{font-size:12.5px;color:var(--muted)}
+
+/* ---- controls: big enough to hit while holding a bag ---- */
+.btn{
+  display:flex;align-items:center;justify-content:center;gap:10px;width:100%;
+  min-height:54px;padding:14px 18px;border:0;border-radius:var(--radius);
+  background:var(--accent);color:var(--accent-ink);
+  font:600 17px/1 system-ui,sans-serif;cursor:pointer;
+}
+.btn.secondary{background:var(--card);color:var(--ink);border:1px solid var(--line)}
+.btn:active{transform:translateY(1px)}
+input[type=search]{
+  width:100%;min-height:54px;padding:14px 16px;font-size:17px;
+  border:1px solid var(--line);border-radius:var(--radius);
+  background:var(--card);color:var(--ink);
+}
+input[type=search]:focus{outline:2px solid var(--accent);outline-offset:1px}
+
+/* ---- stop list ---- */
+.stops{list-style:none;margin:12px 0 0;padding:0}
+.stops li{margin-bottom:8px}
+.stop{
+  display:block;width:100%;text-align:left;min-height:56px;
+  padding:13px 15px;border:1px solid var(--line);border-radius:var(--radius);
+  background:var(--card);color:inherit;cursor:pointer;text-decoration:none;
+}
+.stop:active{border-color:var(--accent)}
+.stop .nm{font-weight:600;display:block;font-size:16px}
+.stop .sub{display:block;margin-top:3px;font-size:12.5px;color:var(--muted)}
+.pill{
+  display:inline-block;padding:2px 8px;border-radius:999px;font-size:11.5px;
+  font-weight:600;background:var(--band);color:var(--band-ink);margin-left:6px;
+  vertical-align:1px;
+}
+.pill.wait{background:transparent;color:var(--muted);border:1px solid var(--line)}
+
+/* ---- the result card ---- */
+.card{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:16px;margin:0 0 12px;
+}
+.card h3{margin:0 0 2px;font-size:17px}
+.metric{margin:14px 0 0}
+.metric .lbl{font-size:13px;color:var(--muted);margin-bottom:5px}
+.metric .val{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+.metric .val.late{color:var(--late)} .metric .val.ontime{color:var(--ontime)} .metric .val.early{color:var(--early)}
+
+/* ---- Wilson interval as a RANGE BAR -----------------------------------
+   A wide band must LOOK wide without reading any numbers. The track is the
+   full 0-100% (or the delay domain); the filled band is the plausible range;
+   the tick is the point estimate. At n=3 this is visibly most of the width.
+------------------------------------------------------------------------ */
+.range{margin-top:8px}
+.track{
+  position:relative;height:16px;border-radius:999px;background:var(--bg);
+  border:1px solid var(--line);overflow:hidden;
+}
+.band{position:absolute;top:0;bottom:0;background:var(--band)}
+.tick{position:absolute;top:-3px;bottom:-3px;width:3px;border-radius:2px;background:var(--band-ink)}
+.scale{display:flex;justify-content:space-between;margin-top:4px;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+
+.note{
+  margin-top:12px;padding:11px 13px;border-radius:10px;
+  background:var(--bg);border:1px solid var(--line);
+  font-size:13.5px;color:var(--muted);
+}
+.scope{
+  display:inline-block;margin-top:10px;padding:5px 10px;border-radius:8px;
+  background:var(--band);color:var(--band-ink);font-size:12.5px;font-weight:600;
+}
+.counts{margin-top:10px;font-size:13.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+
+/* ---- tabs (day type / hour) ---- */
+.tabs{display:flex;gap:8px;overflow-x:auto;padding:2px 0 6px;-webkit-overflow-scrolling:touch}
+.tab{
+  flex:0 0 auto;min-height:44px;padding:10px 15px;border:1px solid var(--line);
+  border-radius:999px;background:var(--card);color:inherit;font-size:14.5px;cursor:pointer;
+}
+.tab[aria-selected=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.hours{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:7px;margin-top:10px}
+.hr{
+  min-height:48px;border:1px solid var(--line);border-radius:10px;background:var(--card);
+  color:inherit;font-size:14px;cursor:pointer;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:2px;
+}
+.hr[aria-selected=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.hr .n{font-size:10.5px;opacity:.7}
+.hr.none{opacity:.42}
+
+a{color:var(--accent)}
+footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
+.hidden{display:none!important}
+.spinner{display:inline-block;width:15px;height:15px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+@media (min-width:760px){
+  .wrap{padding-top:8px}
+  .btn-row{display:flex;gap:10px}
+  .btn-row .btn{width:auto;flex:1}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Is my bus late?</h1>
+    <p class="muted small" id="tagline">Madison Metro on-time performance, measured from the live feed.</p>
+  </header>
+
+  <section class="banner" id="banner" aria-live="polite">
+    <div class="small muted" id="collecting">Loading…</div>
+    <div class="stat-row" id="stats"></div>
+  </section>
+
+  <main id="view"></main>
+
+  <footer>
+    <p>Built from Madison Metro's public GTFS-realtime feed, archived every 30&nbsp;seconds.
+    Nobody else keeps this history — it did not exist before this site started collecting.</p>
+    <p id="generated" class="tiny"></p>
+    <p class="tiny"><a href="https://github.com/jasonuwm27/Madison-Metro-Bus">Source on GitHub</a> ·
+    Not affiliated with the City of Madison.</p>
+  </footer>
+</div>
+<script src="/app.js" type="module"></script>
+</body>
+</html>
