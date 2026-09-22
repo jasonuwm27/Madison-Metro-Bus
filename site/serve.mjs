@@ -6,11 +6,11 @@
  *
  * WHY THIS EXISTS RATHER THAN `npx serve`
  *
- * 1. Deep links. /stop/1234 has no file behind it; Cloudflare Pages rewrites
- *    it to index.html via _redirects. A plain static server returns 404, so
- *    bookmarked stop URLs would appear broken locally while working in
- *    production -- the worst kind of difference to debug. This mirrors the
- *    _redirects rules.
+ * 1. Deep links. /stop/1234 and /route/80 have no file behind them; Cloudflare
+ *    Pages rewrites them to index.html via _redirects. A plain static server
+ *    returns 404, so bookmarked URLs would appear broken locally while
+ *    working in production -- the worst kind of difference to debug. This
+ *    mirrors the _redirects rules.
  *
  * 2. A real origin. The client fetches absolute paths (/data/index.json) and
  *    calls navigator.geolocation. Opening index.html from the filesystem gives
@@ -41,7 +41,7 @@ const server = createServer(async (req, res) => {
   // address bar keeps the real URL. Data and assets are matched first so the
   // catch-all cannot swallow them.
   if (urlPath === "/") urlPath = "/index.html";
-  else if (urlPath.startsWith("/stop/")) urlPath = "/index.html";
+  else if (urlPath.startsWith("/stop/") || urlPath.startsWith("/route/")) urlPath = "/index.html";
 
   // Contain path traversal: normalise, then verify the result is still inside
   // ROOT before touching the filesystem.

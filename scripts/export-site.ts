@@ -1,5 +1,5 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import postgres from "postgres";
 import { loadConfig } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
@@ -19,13 +19,27 @@ import { createLogger } from "../src/logger.js";
  * -- which is taking 6,000 upserts per poll -- entirely off the request path.
  *
  * SHAPE
- *   /data/index.json          stop metadata for the picker + dataset summary
+ *   /data/index.json          stop + route metadata for the pickers + dataset summary
  *   /data/stops/<id>.json     one file per stop, all routes/hours/day types
+ *   /data/routes/<id>.json    one file per route: overall stats, delay profile
+ *                             along the line (per direction), best/worst
+ *                             stops, hour-of-day breakdown
  *
- * Sharding by stop matches the access pattern exactly: a visitor picks one
- * stop and needs everything about it. index.json must stay small because it is
- * downloaded before the user can do anything -- so it carries only what the
- * picker needs to search and sort, not any delay figures.
+ * Sharding by stop (and now by route) matches the access pattern exactly: a
+ * visitor picks one stop or one route and needs everything about it.
+ * index.json must stay small because it is downloaded before the user can do
+ * anything -- so it carries only what the pickers need to search and sort,
+ * not any delay figures.
+ *
+ * ROUTE TIER -- no new base table.
+ * stop_route_hour_stats already carries algebraic aggregates keyed by
+ * (stop_id, route_id, hour_of_day, day_type). A route's overall reliability
+ * and hour-of-day breakdown are exact sums grouped by route_id -- summing an
+ * algebraic aggregate loses no precision, so this needs nothing beyond what
+ * already exists. The one new ingredient is stop ORDER along the route, which
+ * comes from static_stop_times.stop_sequence for a representative trip
+ * pattern per (route, direction) -- the trip with the most stops, chosen once
+ * per export rather than trying to average across every pattern variant.
  */
 
 const arg = (name: string): string | undefined =>
@@ -63,6 +77,41 @@ interface Cell {
   p50_delay_approx: number;
   p90_delay_approx: number;
   service_days: number;
+}
+
+interface RouteMeta {
+  route_id: string;
+  route_name: string | null;
+  n: number;
+}
+
+/** One stop's aggregate stats for one route, summed across hour/day_type. */
+interface RouteStopAgg {
+  route_id: string;
+  stop_id: string;
+  n: number;
+  sum_delay: string; // bigint over the wire
+  n_late_240: number;
+  n_early_60: number;
+}
+
+/** Representative stop order for one (route, direction) -- longest pattern. */
+interface RouteStopOrder {
+  route_id: string;
+  direction_id: number;
+  stop_sequence: number;
+  stop_id: string;
+  stop_name: string | null;
+}
+
+interface RouteHourAgg {
+  route_id: string;
+  hour_of_day: number;
+  day_type: number;
+  n: number;
+  sum_delay: string;
+  n_late_240: number;
+  n_early_60: number;
 }
 
 /**
@@ -153,6 +202,39 @@ function toDateOnly(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return String(value).slice(0, 10);
+}
+
+/** Mirrors the client's esc() -- this runs in a separate process from app.js. */
+function esc(s: string): string {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c,
+  );
+}
+
+/**
+ * Static hero markup baked into index.html at export time.
+ *
+ * This is deliberately a plain summary, not the interactive picker -- app.js
+ * replaces #view wholesale on load. The only job here is to give first paint
+ * (and any crawler, which never runs the client) real numbers instead of
+ * "Loading…".
+ */
+function renderHeroSsr(
+  summary: { totalObservations: number; serviceDays: number; firstServiceDate: string | null },
+  growth: readonly { date: string | null; n: number }[],
+): string {
+  const since = summary.firstServiceDate
+    ? new Date(`${summary.firstServiceDate}T12:00:00Z`).toLocaleDateString("en-US", {
+        day: "numeric", month: "long", year: "numeric",
+      })
+    : null;
+  const totalN = growth.reduce((t, g) => t + g.n, 0) || summary.totalObservations;
+  return `
+    <div class="hero">
+      <h1>Is my bus late?</h1>
+      <p class="lede">See how often Madison Metro actually runs on time — by stop, route, and time of day.
+      ${since ? `Collecting since ${esc(since)}, ${totalN.toLocaleString()} arrivals recorded so far.` : ""}</p>
+    </div>`;
 }
 
 async function main(): Promise<void> {
@@ -248,6 +330,77 @@ async function main(): Promise<void> {
 
     summary.dayTypesPresent = [...new Set(allCells.map((c) => c.day_type))].sort();
 
+    // ---- dataset growth: observations per service day ----------------------
+    // Sourced from rollup_daily so it uses the exact same "countable
+    // observation" filter as every other headline number on the site --
+    // never a separate, possibly-disagreeing count of raw rows.
+    const growth = await sql<{ service_date: unknown; n: string }[]>`
+      select service_date, sum(n)::bigint as n
+      from rollup_daily
+      group by service_date
+      order by service_date
+    `;
+    const growthSeries = growth.map((r) => ({
+      date: toDateOnly(r.service_date),
+      n: Number(r.n),
+    }));
+
+    // ---- route tier ----------------------------------------------------------
+    const feedForRoutes = sql`
+      select id from gtfs_feed_versions where load_completed_at is not null order by loaded_at desc limit 1
+    `;
+
+    const routeMeta = await sql<RouteMeta[]>`
+      with observed as (
+        select route_id, sum(n)::int as n from stop_route_hour_stats group by route_id
+      )
+      select o.route_id, r.route_long_name as route_name, o.n
+      from observed o
+      left join static_routes r
+        on r.route_id = o.route_id and r.feed_version_id = (${feedForRoutes})
+      order by o.route_id
+    `;
+
+    const routeStopAgg = await sql<RouteStopAgg[]>`
+      select route_id, stop_id, sum(n)::int as n, sum(sum_delay)::bigint::text as sum_delay,
+             sum(n_late_240)::int as n_late_240, sum(n_early_60)::int as n_early_60
+      from stop_route_hour_stats
+      group by route_id, stop_id
+    `;
+
+    const routeHourAgg = await sql<RouteHourAgg[]>`
+      select route_id, hour_of_day, day_type, sum(n)::int as n,
+             sum(sum_delay)::bigint::text as sum_delay,
+             sum(n_late_240)::int as n_late_240, sum(n_early_60)::int as n_early_60
+      from stop_route_hour_stats
+      group by route_id, hour_of_day, day_type
+    `;
+
+    // Representative stop order per (route, direction): the trip with the
+    // most stops, picked once rather than trying to reconcile every pattern
+    // variant a route runs (short-turns, detour patterns, etc).
+    const routeStopOrder = await sql<RouteStopOrder[]>`
+      with feed as (${feedForRoutes}),
+      trip_lengths as (
+        select t.trip_id, t.route_id, t.direction_id, count(*) as n_stops
+        from static_trips t
+        join static_stop_times st on st.trip_id = t.trip_id and st.feed_version_id = t.feed_version_id
+        where t.feed_version_id = (select id from feed) and t.direction_id is not null
+        group by t.trip_id, t.route_id, t.direction_id
+      ),
+      best as (
+        select route_id, direction_id, trip_id,
+               row_number() over (partition by route_id, direction_id order by n_stops desc, trip_id) as rn
+        from trip_lengths
+      )
+      select b.route_id, b.direction_id, st.stop_sequence, st.stop_id, s.stop_name
+      from best b
+      join static_stop_times st on st.trip_id = b.trip_id and st.feed_version_id = (select id from feed)
+      left join static_stops s on s.stop_id = st.stop_id and s.feed_version_id = (select id from feed)
+      where b.rn = 1
+      order by b.route_id, b.direction_id, st.stop_sequence
+    `;
+
     const byStop = new Map<string, Cell[]>();
     for (const row of allCells) {
       const { stop_id, ...cell } = row;
@@ -261,10 +414,119 @@ async function main(): Promise<void> {
     // file serving numbers from a window the site no longer claims.
     await rm(outRoot, { recursive: true, force: true });
     await mkdir(join(outRoot, "stops"), { recursive: true });
+    await mkdir(join(outRoot, "routes"), { recursive: true });
 
     let filesWritten = 0;
     let bytes = 0;
     const usableStops = new Set<string>();
+
+    // ---- write route files ---------------------------------------------------
+    const stopAggByRoute = new Map<string, RouteStopAgg[]>();
+    for (const row of routeStopAgg) {
+      const list = stopAggByRoute.get(row.route_id);
+      if (list === undefined) stopAggByRoute.set(row.route_id, [row]);
+      else list.push(row);
+    }
+    const hourAggByRoute = new Map<string, RouteHourAgg[]>();
+    for (const row of routeHourAgg) {
+      const list = hourAggByRoute.get(row.route_id);
+      if (list === undefined) hourAggByRoute.set(row.route_id, [row]);
+      else list.push(row);
+    }
+    const orderByRoute = new Map<string, RouteStopOrder[]>();
+    for (const row of routeStopOrder) {
+      const list = orderByRoute.get(row.route_id);
+      if (list === undefined) orderByRoute.set(row.route_id, [row]);
+      else list.push(row);
+    }
+
+    let routeFilesWritten = 0;
+    let routeBytes = 0;
+    const usableRoutes = new Set<string>();
+    const stopNameById = new Map(stops.map((s) => [s.stop_id, s.stop_name]));
+
+    for (const route of routeMeta) {
+      const stopAgg = stopAggByRoute.get(route.route_id) ?? [];
+      const totalN = stopAgg.reduce((t, r) => t + r.n, 0);
+      const totalDelay = stopAgg.reduce((t, r) => t + Number(r.sum_delay), 0);
+      const totalLate = stopAgg.reduce((t, r) => t + r.n_late_240, 0);
+      const totalEarly = stopAgg.reduce((t, r) => t + r.n_early_60, 0);
+      const [olo, ohi] = wilson(totalLate, totalN);
+
+      // Delay profile along the line: one point per stop, in schedule order,
+      // per direction. This is the "does lateness accumulate toward the end
+      // of the line" shape.
+      const order = orderByRoute.get(route.route_id) ?? [];
+      const aggByStop = new Map(stopAgg.map((r) => [r.stop_id, r]));
+      const directions = [...new Set(order.map((o) => o.direction_id))].sort();
+      const profile = directions.map((dir) => ({
+        direction: dir,
+        stops: order
+          .filter((o) => o.direction_id === dir)
+          .map((o) => {
+            const a = aggByStop.get(o.stop_id);
+            return {
+              seq: o.stop_sequence,
+              id: o.stop_id,
+              name: o.stop_name,
+              n: a?.n ?? 0,
+              mean: a && a.n > 0 ? round(Number(a.sum_delay) / a.n) : null,
+            };
+          }),
+      }));
+
+      // Best/worst stops: ranked by % late, restricted to stops with enough
+      // arrivals to say anything -- same N_PROVISIONAL threshold as the stop
+      // page, so "worst stop" is never a single unlucky observation.
+      const ranked = stopAgg
+        .filter((r) => r.n >= N_PROVISIONAL)
+        .map((r) => ({
+          id: r.stop_id,
+          name: stopNameById.get(r.stop_id) ?? r.stop_id,
+          n: r.n,
+          pctLate: round((r.n_late_240 / r.n) * 100),
+        }))
+        .sort((a, b) => a.pctLate - b.pctLate);
+      const best = ranked.slice(0, 5);
+      const worst = ranked.slice(-5).reverse();
+
+      // Hour-of-day breakdown, summed across all stops on the route.
+      const hourAgg = hourAggByRoute.get(route.route_id) ?? [];
+      const byHourDay = hourAgg.map((r) => {
+        const [hlo, hhi] = wilson(r.n_late_240, r.n);
+        return {
+          h: r.hour_of_day,
+          d: r.day_type,
+          n: r.n,
+          mean: r.n > 0 ? round(Number(r.sum_delay) / r.n) : 0,
+          pctLate: round((r.n_late_240 / r.n) * 100),
+          pctLateLo: round(hlo),
+          pctLateHi: round(hhi),
+        };
+      });
+
+      const payload = {
+        route: { id: route.route_id, name: route.route_name },
+        n: totalN,
+        hasUsableData: totalN >= N_PROVISIONAL,
+        mean: totalN > 0 ? round(totalDelay / totalN) : 0,
+        pctLate: totalN > 0 ? round((totalLate / totalN) * 100) : 0,
+        pctLateLo: round(olo),
+        pctLateHi: round(ohi),
+        nLate: totalLate,
+        nEarly: totalEarly,
+        profile,
+        best,
+        worst,
+        hours: byHourDay,
+        generatedAt: new Date().toISOString(),
+      };
+      if (totalN >= N_PROVISIONAL) usableRoutes.add(route.route_id);
+      const json = JSON.stringify(payload);
+      await writeFile(join(outRoot, "routes", `${route.route_id}.json`), json);
+      routeFilesWritten += 1;
+      routeBytes += Buffer.byteLength(json);
+    }
 
     for (const stop of stops) {
       const cells = byStop.get(stop.stop_id) ?? [];
@@ -344,6 +606,7 @@ async function main(): Promise<void> {
     const index = {
       dataset: summary,
       thresholds: { confident: N_CONFIDENT, provisional: N_PROVISIONAL },
+      growth: growthSeries,
       stops: stops.map((s) => ({
         id: s.stop_id,
         name: s.stop_name,
@@ -359,18 +622,54 @@ async function main(): Promise<void> {
         // and find nothing. Today this is true for only 26% of stops.
         usable: usableStops.has(s.stop_id),
       })),
+      routes: routeMeta.map((r) => ({
+        id: r.route_id,
+        name: r.route_name,
+        n: r.n,
+        usable: usableRoutes.has(r.route_id),
+      })),
       generatedAt: new Date().toISOString(),
     };
     const indexJson = JSON.stringify(index);
     await writeFile(join(outRoot, "index.json"), indexJson);
+
+    // ---- bake headline stats into index.html --------------------------------
+    // First paint must show real content, not "Loading…", so the shell served
+    // to a cold visitor (and to a crawler, which never runs the client fetch)
+    // already carries the dataset's real numbers. app.js still re-fetches and
+    // re-renders on load -- this only fixes what appears before that finishes.
+    //
+    // The template lives at site/public/index.html, one directory above the
+    // default --out target. This is skipped (not an error) when --out points
+    // somewhere without a sibling index.html, e.g. a scratch directory used
+    // for inspecting export output.
+    const htmlPath = join(dirname(outRoot), "index.html");
+    try {
+      const template = await readFile(htmlPath, "utf8");
+      const ssrBlock = renderHeroSsr(summary, growthSeries);
+      const rendered = template.replace(
+        /<!-- SSR-BEGIN -->[\s\S]*?<!-- SSR-END -->/,
+        `<!-- SSR-BEGIN -->${ssrBlock}<!-- SSR-END -->`,
+      );
+      if (rendered === template) {
+        log.warn({ htmlPath }, "SSR markers not found in index.html; left unmodified");
+      } else {
+        await writeFile(htmlPath, rendered);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      log.info({ htmlPath }, "no index.html next to --out; skipping SSR injection");
+    }
 
     log.info(
       {
         out: outRoot,
         stopFiles: filesWritten,
         stopBytes: bytes,
+        routeFiles: routeFilesWritten,
+        routeBytes,
         indexBytes: Buffer.byteLength(indexJson),
-        totalMegabytes: +((bytes + Buffer.byteLength(indexJson)) / 1e6).toFixed(2),
+        totalMegabytes: +((bytes + routeBytes + Buffer.byteLength(indexJson)) / 1e6).toFixed(2),
       },
       "site export complete",
     );

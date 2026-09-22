@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="color-scheme" content="light dark">
-<meta name="theme-color" content="#0b1220">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0a0a0b">
 <title>Is my bus late? — Madison Metro reliability</title>
 <meta name="description" content="How often Madison Metro buses actually run late, by stop, route and time of day. Built from archived GTFS-realtime data.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚌</text></svg>">
@@ -13,77 +13,114 @@
    Mobile-first. Every rule here is the phone rule; desktop is the media query
    at the bottom. The reader is standing outdoors at a bus stop, so: high
    contrast, large type, tap targets >=48px, and no layout that needs two hands.
+
+   PALETTE: near-black, not navy -- navy reads as generic SaaS blue, near-black
+   reads as deliberate. No accent hue: color is reserved entirely for the
+   late/on-time/early status system, so when something IS colored here, it
+   means something. Everything else (buttons, active tabs, the CTA) is
+   neutral -- weight and contrast do the work instead of hue.
 --------------------------------------------------------------------------- */
 :root{
-  --bg:#f6f7f9; --card:#fff; --ink:#0b1220; --muted:#5b6676; --line:#e2e6ec;
-  --accent:#1257d6; --accent-ink:#fff;
+  --bg:#fafafa; --card:#fff; --ink:#0a0a0b; --muted:#6b6b70; --line:#e4e4e7;
+  --raised:#f4f4f5;
+  --accent:#18181b; --accent-ink:#fff;
   --late:#c2410c; --ontime:#15803d; --early:#6d28d9;
-  --band:#dbe4f5; --band-ink:#1257d6;
-  --radius:14px;
+  --band:#e4e4e7; --band-ink:#18181b;
+  --radius:10px;
   --pad:clamp(16px,4vw,28px);
 }
 @media (prefers-color-scheme:dark){
   :root{
-    --bg:#0b1220; --card:#131c2e; --ink:#eef2f8; --muted:#9aa7b8; --line:#243049;
-    --accent:#6ea2ff; --accent-ink:#06101f;
+    --bg:#0a0a0b; --card:#111113; --ink:#ededf0; --muted:#8b8b92; --line:rgba(255,255,255,.09);
+    --raised:#18181b;
+    --accent:#ededf0; --accent-ink:#0a0a0b;
     --late:#fb923c; --ontime:#4ade80; --early:#c4b5fd;
-    --band:#1e2c4a; --band-ink:#6ea2ff;
+    --band:#1c1c1f; --band-ink:#ededf0;
   }
 }
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{
   margin:0; background:var(--bg); color:var(--ink);
-  font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font:15.5px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
   overflow-wrap:break-word;
 }
 .wrap{max-width:720px;margin:0 auto;padding:0 var(--pad) 64px}
-h1{font-size:clamp(22px,6vw,30px);line-height:1.2;margin:20px 0 4px;letter-spacing:-.02em}
-h2{font-size:clamp(17px,4.5vw,21px);margin:28px 0 10px;letter-spacing:-.01em}
+h1{font-size:clamp(23px,6vw,32px);line-height:1.15;margin:0 0 6px;letter-spacing:-.03em;font-weight:700}
+h2{font-size:clamp(14px,3.5vw,15px);margin:0 0 10px;letter-spacing:-.005em;font-weight:600;
+   color:var(--muted);text-transform:uppercase;font-size:12px;letter-spacing:.04em}
 p{margin:0 0 12px}
 .muted{color:var(--muted)}
 .small{font-size:13.5px}
-.tiny{font-size:12.5px}
+.tiny{font-size:12px}
+.section{margin-top:40px}
 
-/* ---- dataset banner: the "collecting since" feature, not an apology ---- */
-.banner{
-  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-  padding:16px;margin:14px 0 18px;
+/* ---- hero: answers "what is this / what do I do" in one screen -------- */
+.hero{padding-top:28px}
+.hero .lede{font-size:16px;color:var(--muted);margin:0 0 24px;max-width:46ch}
+
+/* ---- entry points: route or stop, side by side, the primary choice ---- */
+.entry{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+.entry-btn{
+  display:flex;flex-direction:column;align-items:flex-start;gap:6px;width:100%;
+  min-height:88px;padding:16px 16px;border:1px solid var(--line);border-radius:var(--radius);
+  background:var(--card);color:inherit;cursor:pointer;text-align:left;
 }
-.stat-row{display:flex;flex-wrap:wrap;gap:18px;margin-top:10px}
-.stat b{display:block;font-size:22px;line-height:1.15;font-variant-numeric:tabular-nums}
-.stat span{font-size:12.5px;color:var(--muted)}
+.entry-btn:active{border-color:var(--ink)}
+.entry-btn .ic{font-size:20px;line-height:1;opacity:.8}
+.entry-btn .et{font-weight:600;font-size:15.5px}
+.entry-btn .es{font-size:12.5px;color:var(--muted)}
+.locate-btn{
+  display:flex;align-items:center;justify-content:center;gap:10px;width:100%;
+  min-height:60px;padding:14px 18px;border:0;border-radius:var(--radius);
+  background:var(--accent);color:var(--accent-ink);
+  font:600 16px/1.15 system-ui,sans-serif;cursor:pointer;
+}
+.locate-btn:active{opacity:.85}
 
 /* ---- controls: big enough to hit while holding a bag ---- */
 .btn{
   display:flex;align-items:center;justify-content:center;gap:10px;width:100%;
-  min-height:54px;padding:14px 18px;border:0;border-radius:var(--radius);
-  background:var(--accent);color:var(--accent-ink);
-  font:600 17px/1 system-ui,sans-serif;cursor:pointer;
+  min-height:50px;padding:12px 18px;border:1px solid var(--line);border-radius:var(--radius);
+  background:var(--card);color:var(--ink);
+  font:600 15px/1 system-ui,sans-serif;cursor:pointer;
 }
-.btn.secondary{background:var(--card);color:var(--ink);border:1px solid var(--line)}
-.btn:active{transform:translateY(1px)}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn:active{opacity:.85}
+.btn.link-btn{
+  background:transparent;color:var(--ink);border:0;min-height:auto;
+  padding:10px 0;font-weight:600;font-size:14px;width:auto;text-decoration:underline;
+  text-underline-offset:3px;text-decoration-color:var(--line);
+}
 input[type=search]{
-  width:100%;min-height:54px;padding:14px 16px;font-size:17px;
+  width:100%;min-height:50px;padding:12px 15px;font-size:16px;
   border:1px solid var(--line);border-radius:var(--radius);
   background:var(--card);color:var(--ink);
 }
-input[type=search]:focus{outline:2px solid var(--accent);outline-offset:1px}
+input[type=search]:focus{outline:2px solid var(--ink);outline-offset:-1px}
 
-/* ---- stop list ---- */
-.stops{list-style:none;margin:12px 0 0;padding:0}
-.stops li{margin-bottom:8px}
+/* ---- toggle between stop-search and route-search on the landing page -- */
+.seg{display:flex;border:1px solid var(--line);border-radius:var(--radius);padding:3px;gap:3px;margin-bottom:12px}
+.seg button{
+  flex:1;min-height:40px;border:0;border-radius:calc(var(--radius) - 4px);background:transparent;
+  color:var(--muted);font:600 13.5px/1 system-ui,sans-serif;cursor:pointer;
+}
+.seg button[aria-selected=true]{background:var(--raised);color:var(--ink)}
+
+/* ---- lists: stops and routes ---- */
+.stops{list-style:none;margin:10px 0 0;padding:0}
+.stops li{margin-bottom:6px}
 .stop{
-  display:block;width:100%;text-align:left;min-height:56px;
-  padding:13px 15px;border:1px solid var(--line);border-radius:var(--radius);
+  display:block;width:100%;text-align:left;min-height:52px;
+  padding:11px 14px;border:1px solid var(--line);border-radius:var(--radius);
   background:var(--card);color:inherit;cursor:pointer;text-decoration:none;
 }
-.stop:active{border-color:var(--accent)}
-.stop .nm{font-weight:600;display:block;font-size:16px}
-.stop .sub{display:block;margin-top:3px;font-size:12.5px;color:var(--muted)}
+.stop:active{border-color:var(--ink)}
+.stop .nm{font-weight:600;display:block;font-size:15px}
+.stop .sub{display:block;margin-top:2px;font-size:12px;color:var(--muted)}
 .pill{
-  display:inline-block;padding:2px 8px;border-radius:999px;font-size:11.5px;
+  display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;
   font-weight:600;background:var(--band);color:var(--band-ink);margin-left:6px;
   vertical-align:1px;
 }
@@ -94,11 +131,40 @@ input[type=search]:focus{outline:2px solid var(--accent);outline-offset:1px}
   background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
   padding:16px;margin:0 0 12px;
 }
-.card h3{margin:0 0 2px;font-size:17px}
+.card h3{margin:0 0 2px;font-size:15.5px;font-weight:600;color:var(--muted)}
+
+/* ---- the headline sentence: the answer, before any chart or number ---- */
+.headline{font-size:clamp(19px,5vw,23px);font-weight:700;line-height:1.3;margin:4px 0 4px;letter-spacing:-.01em}
+.headline .hi.late{color:var(--late)} .headline .hi.ontime{color:var(--ontime)} .headline .hi.early{color:var(--early)}
+.headline-sub{font-size:13px;color:var(--muted);margin:0 0 4px}
+
 .metric{margin:14px 0 0}
-.metric .lbl{font-size:13px;color:var(--muted);margin-bottom:5px}
-.metric .val{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+.metric .lbl{font-size:12.5px;color:var(--muted);margin-bottom:5px}
+.metric .val{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
 .metric .val.late{color:var(--late)} .metric .val.ontime{color:var(--ontime)} .metric .val.early{color:var(--early)}
+
+/* ---- presets: the default way into a stop, grid is the escape hatch --- */
+.presets{display:grid;grid-template-columns:1fr;gap:7px;margin-top:10px}
+.preset{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;
+  min-height:52px;padding:12px 15px;border:1px solid var(--line);border-radius:var(--radius);
+  background:var(--card);color:inherit;font:inherit;cursor:pointer;text-align:left;
+}
+.preset[aria-selected=true]{border-color:var(--ink);background:var(--raised)}
+.preset .pn{font-weight:600;font-size:14.5px}
+.preset .pw{font-size:12px;color:var(--muted);margin-top:2px}
+.preset .pv{font-weight:700;font-size:14.5px;white-space:nowrap}
+.preset .pv.late{color:var(--late)} .preset .pv.ontime{color:var(--ontime)} .preset .pv.early{color:var(--early)}
+
+/* ---- progressive disclosure: detail is one tap away, not the default -- */
+details.more{margin-top:16px}
+details.more>summary{
+  cursor:pointer;list-style:none;font-size:13.5px;font-weight:600;color:var(--ink);
+  padding:10px 0;user-select:none;
+}
+details.more>summary::-webkit-details-marker{display:none}
+details.more>summary::before{content:"▸ ";display:inline-block;transition:transform .15s;color:var(--muted)}
+details.more[open]>summary::before{transform:rotate(90deg)}
 
 /* ---- Wilson interval as a RANGE BAR -----------------------------------
    A wide band must LOOK wide without reading any numbers. The track is the
@@ -107,72 +173,108 @@ input[type=search]:focus{outline:2px solid var(--accent);outline-offset:1px}
 ------------------------------------------------------------------------ */
 .range{margin-top:8px}
 .track{
-  position:relative;height:16px;border-radius:999px;background:var(--bg);
+  position:relative;height:14px;border-radius:999px;background:var(--raised);
   border:1px solid var(--line);overflow:hidden;
 }
 .band{position:absolute;top:0;bottom:0;background:var(--band)}
 .tick{position:absolute;top:-3px;bottom:-3px;width:3px;border-radius:2px;background:var(--band-ink)}
-.scale{display:flex;justify-content:space-between;margin-top:4px;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.scale{display:flex;justify-content:space-between;margin-top:4px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
 
 .note{
-  margin-top:12px;padding:11px 13px;border-radius:10px;
-  background:var(--bg);border:1px solid var(--line);
-  font-size:13.5px;color:var(--muted);
+  margin-top:12px;padding:11px 13px;border-radius:8px;
+  background:var(--raised);border:1px solid var(--line);
+  font-size:13px;color:var(--muted);
 }
 .scope{
-  display:inline-block;margin-top:10px;padding:5px 10px;border-radius:8px;
-  background:var(--band);color:var(--band-ink);font-size:12.5px;font-weight:600;
+  display:inline-block;margin-top:10px;padding:5px 10px;border-radius:6px;
+  background:var(--band);color:var(--band-ink);font-size:12px;font-weight:600;
 }
-.counts{margin-top:10px;font-size:13.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.counts{margin-top:10px;font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
 
 /* ---- tabs (day type / hour) ---- */
-.tabs{display:flex;gap:8px;overflow-x:auto;padding:2px 0 6px;-webkit-overflow-scrolling:touch}
+.tabs{display:flex;gap:7px;overflow-x:auto;padding:2px 0 6px;-webkit-overflow-scrolling:touch}
 .tab{
-  flex:0 0 auto;min-height:44px;padding:10px 15px;border:1px solid var(--line);
-  border-radius:999px;background:var(--card);color:inherit;font-size:14.5px;cursor:pointer;
+  flex:0 0 auto;min-height:40px;padding:9px 14px;border:1px solid var(--line);
+  border-radius:999px;background:var(--card);color:inherit;font-size:13.5px;cursor:pointer;
 }
 .tab[aria-selected=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
-.hours{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:7px;margin-top:10px}
+.hours{display:grid;grid-template-columns:repeat(auto-fill,minmax(60px,1fr));gap:6px;margin-top:10px}
 .hr{
-  min-height:48px;border:1px solid var(--line);border-radius:10px;background:var(--card);
-  color:inherit;font-size:14px;cursor:pointer;display:flex;flex-direction:column;
+  min-height:44px;border:1px solid var(--line);border-radius:8px;background:var(--card);
+  color:inherit;font-size:13px;cursor:pointer;display:flex;flex-direction:column;
   align-items:center;justify-content:center;gap:2px;
 }
 .hr[aria-selected=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
-.hr .n{font-size:10.5px;opacity:.7}
-.hr.none{opacity:.42}
+.hr .n{font-size:10px;opacity:.7}
+.hr.none{opacity:.4}
+details.grid-toggle{margin-top:18px}
+details.grid-toggle>summary{
+  cursor:pointer;list-style:none;font-size:13px;font-weight:600;color:var(--muted);
+  padding:6px 0;user-select:none;
+}
+details.grid-toggle>summary::-webkit-details-marker{display:none}
+details.grid-toggle>summary::before{content:"▸ ";display:inline-block;transition:transform .15s}
+details.grid-toggle[open]>summary::before{transform:rotate(90deg)}
 
-a{color:var(--accent)}
-footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
+/* ---- route page: overall figure, delay-profile chart, best/worst ---- */
+.route-head{margin-bottom:18px}
+.route-head .headline{margin-top:8px}
+.dir-tabs{margin-bottom:6px}
+.profile-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 calc(var(--pad) * -1);padding:0 var(--pad)}
+.profile-svg{display:block}
+.profile-note{font-size:12px;color:var(--muted);margin-top:8px}
+.rank-list{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:6px}
+.rank-list li{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:10px 13px;border:1px solid var(--line);border-radius:8px;font-size:13.5px;
+}
+.rank-list .rn{font-weight:600}
+.rank-list .rv{font-variant-numeric:tabular-nums;font-weight:600}
+.two-col{display:grid;grid-template-columns:1fr;gap:20px;margin-top:8px}
+
+/* ---- dataset growth chart + the "nobody else keeps this" claim -------- */
+.growth-card{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:18px 16px;margin-top:14px;
+}
+.growth-claim{font-size:15px;font-weight:600;line-height:1.4;margin:0 0 4px}
+.growth-sub{font-size:12.5px;color:var(--muted);margin:0 0 14px}
+.growth-svg{display:block;width:100%;height:auto}
+.growth-caption{font-size:11.5px;color:var(--muted);margin-top:8px;text-align:right}
+
+/* ---- dataset banner: demoted to a footnote of credibility ---- */
+.banner{
+  border-top:1px solid var(--line);padding-top:16px;margin-top:14px;
+}
+.stat-row{display:flex;flex-wrap:wrap;gap:18px 22px;margin-top:10px}
+.stat b{display:block;font-size:19px;line-height:1.15;font-variant-numeric:tabular-nums;font-weight:700}
+.stat span{font-size:11.5px;color:var(--muted)}
+
+a{color:inherit;text-decoration-color:var(--line)}
+footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
 .hidden{display:none!important}
-.spinner{display:inline-block;width:15px;height:15px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
 @media (min-width:760px){
   .wrap{padding-top:8px}
-  .btn-row{display:flex;gap:10px}
-  .btn-row .btn{width:auto;flex:1}
+  .two-col{grid-template-columns:1fr 1fr}
 }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <header>
-    <h1>Is my bus late?</h1>
-    <p class="muted small" id="tagline">Madison Metro on-time performance, measured from the live feed.</p>
-  </header>
-
-  <section class="banner" id="banner" aria-live="polite">
-    <div class="small muted" id="collecting">Loading…</div>
-    <div class="stat-row" id="stats"></div>
-  </section>
-
-  <main id="view"></main>
+  <main id="view">
+    <!-- SSR-BEGIN -->
+    <div class="hero">
+      <h1>Is my bus late?</h1>
+      <p class="lede">See how often Madison Metro actually runs on time — by stop, route, and time of day.
+      Collecting since September 15, 2026, 217,411 arrivals recorded so far.</p>
+    </div><!-- SSR-END -->
+  </main>
 
   <footer>
-    <p>Built from Madison Metro's public GTFS-realtime feed, archived every 30&nbsp;seconds.
-    Nobody else keeps this history — it did not exist before this site started collecting.</p>
     <p id="generated" class="tiny"></p>
     <p class="tiny"><a href="https://github.com/jasonuwm27/Madison-Metro-Bus">Source on GitHub</a> ·
     Not affiliated with the City of Madison.</p>
