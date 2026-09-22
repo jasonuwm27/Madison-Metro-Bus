@@ -443,6 +443,33 @@ literally rather than expanded. The wrapper sources the file itself.
 `bus-drop` silence means Supabase fills without warning. Create those two
 checks and fill the placeholders in the env file.
 
+## Parallel-run result (2026-09-22)
+
+Five days of independent collection, Supabase vs local Postgres.
+
+| | |
+|---|---|
+| Supabase | 343,269 obs, 8 service days, **208 MB of 500 MB** |
+| Local | 265,160 obs, 6 service days, 160 MB on a 50GB volume |
+| Settled rows compared | 249,345 |
+| Identical `observed_arrival` | 223,358 (**89.6%**) |
+| **Where both saw the same `change_count`** | **99.90% identical** |
+
+**The 10% disagreement is NOT a pipeline defect.** Deltas are median 13s, 97.9%
+under a minute, and they vanish when both workers observed the same number of
+feed revisions. Two workers polling 30s apart each capture a slightly different
+"last prediction before the bus passed" -- which is inherent to independent
+polling, not to the transform.
+
+An earlier read of a 5-row sample suggested detour trips were the cause. That
+was wrong: 79% of mismatches are on ordinary unmodified trips. The sample was
+misleading; the change_count correlation is the real explanation.
+
+**Implication for the diff script:** comparing `observed_arrival` byte-for-byte
+across independently-polling workers can never reach 100%. A useful diff should
+either compare only rows where `change_count` matches, or treat sub-minute
+deltas as agreement.
+
 ## Known gaps / next steps
 
 - **Departure-only stops are skipped.** 149 of 6,035 in the sample — trip origin
