@@ -21,10 +21,8 @@ const LATE_THRESHOLD_MIN = 4;
 // workers/live-status/README.md for why a Worker exists at all and how its
 // free-tier budget holds up. Empty string means the pulse silently doesn't
 // render -- same "absence disables the feature" pattern as the server-side
-// healthcheck config, and it's ALSO the state until the Worker is actually
-// deployed (workers/live-status/README.md's one-time setup) and this
-// placeholder is replaced with the real *.workers.dev URL it prints out.
-const LIVE_STATUS_URL = ""; // TODO: fill in after `wrangler deploy`
+// healthcheck config.
+const LIVE_STATUS_URL = "https://bus-live-status.live-status.workers.dev";
 const LIVE_POLL_MS = 30_000; // matches the real collector's TripUpdates cadence
 
 const $ = (sel) => document.querySelector(sel);
