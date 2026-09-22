@@ -514,6 +514,58 @@ was down ~3 minutes.
 
 `bus-drop` now carries `--retain=400` (was 10 for Supabase's cap).
 
+## Site deployed (2026-09-22) -- madison-bus.pages.dev
+
+Live at **https://madison-bus.pages.dev**, nightly at 05:15 CT via
+`bus-deploy.timer` (after rollup 03:15 and archive-sync 04:30, before drop
+06:15).
+
+`_redirects` **is honored in production**: `/stop/1000` returns the shell with
+200, which is the capability GitHub Pages lacks and the reason Cloudflare was
+chosen. `_headers` applies too (index.json gets max-age=300).
+
+Note: an unmatched path like `/nope` also returns 200 with the shell rather
+than 404 -- Pages falls back to the SPA shell. Harmless, but typos render the
+app instead of an error.
+
+Credentials in `/etc/bus-cloudflare.env`, root:bushc 0640. The token is
+Pages:Write only and IP-restricted to the VM.
+
+**`/user/tokens/verify` returns "Invalid API Token" for a correctly-scoped
+Pages token** -- that endpoint needs `User:Read`, which a Pages-only token
+rightly lacks. Verify against the Pages projects endpoint instead; a failure
+there is real.
+
+**`npx` cannot run under this unit.** `ProtectHome=read-only` denies npm's
+`~/.npm` cache, so the deploy script calls the globally-installed wrangler
+directly and sets `WRANGLER_HOME` to a writable path in the repo. This also
+removes a network fetch of the tool from every deploy.
+
+## rclone migrated to a personal client ID (2026-09-22)
+
+The shared-client retirement deadline is resolved. `rclone about` no longer
+warns.
+
+**`scope = drive`, not `drive.file`.** Under `drive.file` each OAuth client
+only sees files IT created, so the new client reported
+`directory not found` for `BusProject/archive` -- 435 shards and 7 dumps were
+intact but invisible. Verified before retiring the old config: both clients
+listed **435 objects / 1.349 GiB** and **7 dumps / 67.066 MiB** with identical
+filenames, and a full sync confirmed **435/435 by MD5, 0 mismatched**, with the
+round-trip proof passing. Old configs kept under `~/.config/rclone/retired/`.
+
+## SELinux: files arriving via /tmp
+
+Three times now a file copied through `/tmp` landed with `user_tmp_t` and was
+unreadable by systemd. Always relabel after `scp`-via-`/tmp`:
+
+    sudo chcon -t etc_t /etc/bus-*.env          # config
+    chcon -t config_home_t ~/.config/rclone/*   # user config
+    sudo chcon -t bin_t /usr/local/bin/*.sh     # executables
+
+The failure looks like a permission problem and is not -- ownership and mode
+will both be correct.
+
 ## Known gaps / next steps
 
 - **Departure-only stops are skipped.** 149 of 6,035 in the sample — trip origin
