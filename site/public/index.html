@@ -58,7 +58,27 @@ p{margin:0 0 12px}
 
 /* ---- hero: answers "what is this / what do I do" in one screen -------- */
 .hero{padding-top:28px}
-.hero .lede{font-size:16px;color:var(--muted);margin:0 0 24px;max-width:46ch}
+.hero .lede{font-size:16px;color:var(--muted);margin:0 0 16px;max-width:46ch}
+
+/* ---- live pulse: the one live element on an otherwise static site ------
+   A thin animated waveform, not a stat card -- the point is to read as "this
+   is running right now" at a glance, not to be parsed. --i staggers each
+   bar's animation-delay so the strip reads as a continuous wave. .stale (set
+   when a fetch fails or the endpoint is unset) freezes the animation rather
+   than hiding it -- a paused pulse still communicates state honestly. */
+.pulse{margin:0 0 22px}
+.pulse-wave{display:flex;align-items:center;gap:2px;height:20px;margin-bottom:6px}
+.pbar{
+  flex:1;min-width:2px;max-width:5px;height:35%;border-radius:2px;background:var(--ontime);
+  opacity:.55;animation:pbar-wave 1.8s ease-in-out calc(var(--i) * 0.07s) infinite;
+}
+.pulse.stale .pbar{animation-play-state:paused;background:var(--muted);opacity:.3;height:20%!important}
+@keyframes pbar-wave{
+  0%,100%{height:20%}
+  50%{height:90%}
+}
+.pulse-text{margin:0;font-variant-numeric:tabular-nums}
+@media (prefers-reduced-motion:reduce){.pbar{animation:none;height:50%}}
 
 /* ---- entry points: route or stop, side by side, the primary choice ---- */
 .entry{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
@@ -221,15 +241,41 @@ details.grid-toggle[open]>summary::before{transform:rotate(90deg)}
 .route-head .headline{margin-top:8px}
 .dir-tabs{margin-bottom:6px}
 .profile-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 calc(var(--pad) * -1);padding:0 var(--pad)}
-.profile-svg{display:block}
+.profile-svg{display:block;overflow:visible}
 .profile-note{font-size:12px;color:var(--muted);margin-top:8px}
+
+/* ---- profile chart dots: tap-to-select is primary, hover is a bonus ----
+   The visible dot (.pdot) is small and precise; .pdot-hit is the REAL tap
+   target, sized well past the dot itself so a finger doesn't need to land on
+   a 3.5px circle. Selection state persists via .selected -- unlike a
+   tooltip, it survives after the finger lifts, which is the whole point on
+   touch. Hover-highlighting the dot under the pointer is desktop-only sugar
+   layered on top via a plain CSS :hover, never required to see a value. */
+.pdot{fill:var(--ink);stroke:var(--card);stroke-width:1.5px;transition:r .1s}
+.pdot-g.selected .pdot{fill:var(--late);r:5}
+.pdot-hit{
+  width:100%;height:100%;border:0;background:transparent;border-radius:50%;
+  cursor:pointer;padding:0;display:block;
+}
+@media (hover:hover){
+  .pdot-g:hover .pdot{r:5}
+}
+.profile-detail{margin-top:10px}
+.profile-card{border-color:var(--ink)}
+.profile-card h3{margin-bottom:8px}
 .rank-list{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:6px}
 .rank-list li{
-  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  display:flex;align-items:flex-start;justify-content:space-between;gap:10px;
   padding:10px 13px;border:1px solid var(--line);border-radius:8px;font-size:13.5px;
 }
-.rank-list .rn{font-weight:600}
-.rank-list .rv{font-variant-numeric:tabular-nums;font-weight:600}
+.rank-list .rn{font-weight:600;display:block}
+.rank-list .rn-sub{display:block;margin-top:2px;font-size:11.5px;color:var(--muted)}
+.rank-list .rv{font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap;padding-top:1px}
+.flag-badge{
+  display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;
+  background:var(--late);color:#fff;font-size:10.5px;font-weight:700;vertical-align:1px;
+}
+@media (prefers-color-scheme:dark){.flag-badge{color:#1a0800}}
 .two-col{display:grid;grid-template-columns:1fr;gap:20px;margin-top:8px}
 
 /* ---- dataset growth chart + the "nobody else keeps this" claim -------- */

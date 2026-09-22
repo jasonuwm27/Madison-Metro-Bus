@@ -1,0 +1,12 @@
+name = "bus-live-status"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+# Bound at deploy time to the real namespace id (see workers/live-status/README.md).
+# The binding NAME must stay LIVE_STATUS -- worker.js references it directly.
+kv_namespaces = [
+  { binding = "LIVE_STATUS", id = "c1dd8de12f6d4b58bcef72a1981298c8" }
+]
+
+# PUSH_TOKEN is a secret, set via `wrangler secret put PUSH_TOKEN`, not here --
+# wrangler.toml is checked into git.

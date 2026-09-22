@@ -130,6 +130,21 @@ async function main(): Promise<void> {
   const schedule = new ScheduleCache(sql, log);
   await schedule.initialise(today);
 
+  // Seed the running total once at startup rather than querying it every poll
+  // -- dataset_summary aggregates rollup_daily, which is cheap but pointless
+  // to hit every 30s when the poll loop already knows how many NEW rows it
+  // just wrote. After the seed, the total advances in-process by rowsChanged.
+  let totalObservations = 0;
+  try {
+    const [row] = await sql<{ total_observations: string }[]>`
+      select coalesce(total_observations, 0)::text as total_observations from dataset_summary
+    `;
+    totalObservations = Number(row?.total_observations ?? 0);
+  } catch (error) {
+    log.warn({ err: error }, "could not seed observation total for live status");
+  }
+  let lastLiveStatusPushMs = 0;
+
   let uploader: ShardUploader | undefined;
   if (cfg.archive.sink === "r2") uploader = createR2Uploader(cfg.archive.r2);
   const archive = new HourlyNdjsonArchive({
@@ -198,6 +213,14 @@ async function main(): Promise<void> {
     outcome.rowsSkipped =
       stats.skippedNoData + stats.skippedDepartureOnly + stats.skippedNoTime;
     outcome.ok = true;
+    // Distinct real vehicles reporting this poll -- excludes the planned-
+    // itinerary half of a detour trip's doubled entity, which carries no
+    // vehicleId (see CLAUDE.md, "detoured trips are published twice").
+    // Deduplicated because a single bus can appear against more than one
+    // tripUpdate entity within a poll (e.g. mid-transfer between trips).
+    const busesTracked = new Set(
+      feed.tripUpdates.filter((t) => t.vehicleId !== null).map((t) => t.vehicleId),
+    ).size;
     outcome.extra = {
       entityCounts: feed.entityCounts,
       unmatchedTrips: stats.unmatchedTrips,
@@ -208,6 +231,7 @@ async function main(): Promise<void> {
       unidentifiableTrips: feed.unidentifiableTrips,
       newRows: written.rowsChanged,
       cachedTrips: schedule.cachedTripCount,
+      busesTracked,
     };
     return outcome;
   };
@@ -240,6 +264,7 @@ async function main(): Promise<void> {
     intervalMs: number,
     poll: () => Promise<PollOutcome>,
     pingHealthcheck: boolean,
+    onPollComplete?: (outcome: PollOutcome) => void,
   ): Promise<void> => {
     while (!shutdown.stopping) {
       const startedAt = new Date();
@@ -280,13 +305,31 @@ async function main(): Promise<void> {
 
       await recordRun(sql, log, feedName, startedAt, durationMs, outcome);
       if (outcome.ok && pingHealthcheck) await ping(cfg, log);
+      if (outcome.ok && onPollComplete) onPollComplete(outcome);
 
       await shutdown.sleep(Math.max(0, intervalMs - durationMs));
     }
   };
 
+  const onTripsPollComplete = (outcome: PollOutcome): void => {
+    totalObservations += outcome.rowsChanged ?? 0;
+    if (cfg.liveStatus.url === "") return;
+    const now = Date.now();
+    // Throttled independently of the 30s poll interval so the write rate is
+    // fixed at deploy time (see workers/live-status/README.md's budget math)
+    // rather than tracking whatever POLL_INTERVAL_TRIPS_MS happens to be.
+    if (now - lastLiveStatusPushMs < cfg.liveStatus.pushIntervalMs) return;
+    lastLiveStatusPushMs = now;
+    pushLiveStatus(cfg, log, {
+      rowsLastPoll: outcome.rowsWritten ?? 0,
+      totalObservations,
+      busesTracked: typeof outcome.extra["busesTracked"] === "number" ? outcome.extra["busesTracked"] : 0,
+      lastPollAt: new Date().toISOString(),
+    });
+  };
+
   const loops = [
-    runLoop("trips", cfg.pollIntervalMs.tripUpdates, pollTripUpdates, true),
+    runLoop("trips", cfg.pollIntervalMs.tripUpdates, pollTripUpdates, true, onTripsPollComplete),
     runLoop(
       "vehicles",
       cfg.pollIntervalMs.vehiclePositions,
@@ -364,6 +407,38 @@ async function ping(cfg: Config, log: Logger): Promise<void> {
   } catch (error) {
     log.warn({ err: error }, "healthcheck ping failed");
   }
+}
+
+interface LiveStatusPayload {
+  rowsLastPoll: number;
+  totalObservations: number;
+  busesTracked: number;
+  lastPollAt: string;
+}
+
+/**
+ * Push the "is this alive" blob to the Cloudflare Worker fronting KV.
+ *
+ * Not awaited by the caller's poll loop -- this is cosmetic (a pulse on the
+ * landing page), never load-bearing, so it must not be able to slow down or
+ * fail the collection loop. Failure is logged at debug, not warn: a transient
+ * miss here just means the pulse looks briefly stale, which is a acceptable
+ * outcome for a feature that exists purely to look alive, not one worth
+ * paging anyone over.
+ */
+function pushLiveStatus(cfg: Config, log: Logger, payload: LiveStatusPayload): void {
+  if (cfg.liveStatus.url === "") return;
+  fetch(cfg.liveStatus.url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${cfg.liveStatus.token}`,
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(5_000),
+  }).catch((error: unknown) => {
+    log.debug({ err: error }, "live status push failed");
+  });
 }
 
 main().catch((error: unknown) => {

@@ -91,6 +91,7 @@ interface RouteStopAgg {
   stop_id: string;
   n: number;
   sum_delay: string; // bigint over the wire
+  sum_delay_sq: string; // bigint over the wire
   n_late_240: number;
   n_early_60: number;
 }
@@ -102,6 +103,7 @@ interface RouteStopOrder {
   stop_sequence: number;
   stop_id: string;
   stop_name: string | null;
+  trip_headsign: string | null;
 }
 
 interface RouteHourAgg {
@@ -362,7 +364,9 @@ async function main(): Promise<void> {
     `;
 
     const routeStopAgg = await sql<RouteStopAgg[]>`
-      select route_id, stop_id, sum(n)::int as n, sum(sum_delay)::bigint::text as sum_delay,
+      select route_id, stop_id, sum(n)::int as n,
+             sum(sum_delay)::bigint::text as sum_delay,
+             sum(sum_delay_sq)::bigint::text as sum_delay_sq,
              sum(n_late_240)::int as n_late_240, sum(n_early_60)::int as n_early_60
       from stop_route_hour_stats
       group by route_id, stop_id
@@ -389,11 +393,12 @@ async function main(): Promise<void> {
         group by t.trip_id, t.route_id, t.direction_id
       ),
       best as (
-        select route_id, direction_id, trip_id,
-               row_number() over (partition by route_id, direction_id order by n_stops desc, trip_id) as rn
-        from trip_lengths
+        select tl.route_id, tl.direction_id, tl.trip_id, t.trip_headsign,
+               row_number() over (partition by tl.route_id, tl.direction_id order by tl.n_stops desc, tl.trip_id) as rn
+        from trip_lengths tl
+        join static_trips t on t.trip_id = tl.trip_id and t.feed_version_id = (select id from feed)
       )
-      select b.route_id, b.direction_id, st.stop_sequence, st.stop_id, s.stop_name
+      select b.route_id, b.direction_id, b.trip_headsign, st.stop_sequence, st.stop_id, s.stop_name
       from best b
       join static_stop_times st on st.trip_id = b.trip_id and st.feed_version_id = (select id from feed)
       left join static_stops s on s.stop_id = st.stop_id and s.feed_version_id = (select id from feed)
@@ -461,31 +466,105 @@ async function main(): Promise<void> {
       const directions = [...new Set(order.map((o) => o.direction_id))].sort();
       const profile = directions.map((dir) => ({
         direction: dir,
+        // Every stop on a direction shares the same representative trip, so
+        // its headsign is one value per direction, not per stop.
+        headsign: order.find((o) => o.direction_id === dir)?.trip_headsign ?? null,
         stops: order
           .filter((o) => o.direction_id === dir)
           .map((o) => {
             const a = aggByStop.get(o.stop_id);
+            if (a === undefined || a.n === 0) {
+              return { seq: o.stop_sequence, id: o.stop_id, name: o.stop_name, n: 0, mean: null, meanLo: null, meanHi: null };
+            }
+            const mean = Number(a.sum_delay) / a.n;
+            // Same SE-of-the-mean convention as the stop page's cellCard, so
+            // "delay with its interval" means the same thing everywhere on
+            // the site rather than two different uncertainty conventions.
+            const variance = a.n > 1 ? Math.max(0, Number(a.sum_delay_sq) / a.n - mean * mean) : 0;
+            const se = a.n > 1 ? Math.sqrt(variance) / Math.sqrt(a.n) : 0;
             return {
               seq: o.stop_sequence,
               id: o.stop_id,
               name: o.stop_name,
-              n: a?.n ?? 0,
-              mean: a && a.n > 0 ? round(Number(a.sum_delay) / a.n) : null,
+              n: a.n,
+              mean: round(mean),
+              meanLo: round(mean - 1.96 * se),
+              meanHi: round(mean + 1.96 * se),
             };
           }),
       }));
 
-      // Best/worst stops: ranked by % late, restricted to stops with enough
-      // arrivals to say anything -- same N_PROVISIONAL threshold as the stop
-      // page, so "worst stop" is never a single unlucky observation.
-      const ranked = stopAgg
-        .filter((r) => r.n >= N_PROVISIONAL)
+      // Best/worst stops: ranked by % late, restricted to stops with N_CONFIDENT
+      // (20) arrivals rather than the lighter N_PROVISIONAL (5) used elsewhere.
+      // This ranking makes a claim someone is meant to act on ("go dig into
+      // why"), and N_PROVISIONAL only promises "not complete noise" -- a
+      // five-observation stop at the top of a ranked list reads as confident
+      // regardless of caption. N_CONFIDENT is where the Wilson interval has
+      // actually narrowed past "wide open".
+      const stopSeq = new Map(order.map((o) => [o.stop_id, o.stop_sequence]));
+      const maxSeq = order.length > 0 ? Math.max(...order.map((o) => o.stop_sequence)) : 1;
+
+      const rankedRaw = stopAgg
+        .filter((r) => r.n >= N_CONFIDENT)
         .map((r) => ({
           id: r.stop_id,
           name: stopNameById.get(r.stop_id) ?? r.stop_id,
           n: r.n,
+          mean: Number(r.sum_delay) / r.n,
           pctLate: round((r.n_late_240 / r.n) * 100),
-        }))
+          seq: stopSeq.get(r.stop_id) ?? null,
+        }));
+
+      // Delay accumulates along a route (see the profile chart), so position
+      // is a real explanatory variable, not noise -- a stop being "worst"
+      // because it's simply near the end of a long route is a different,
+      // less interesting fact than a stop that's worse than ITS position
+      // predicts. Fit mean delay as a linear function of position-along-route
+      // (0..1, so routes of different lengths are comparable) using ordinary
+      // least squares over stops that have both a position and enough data,
+      // then flag stops whose actual mean sits well above that trend line.
+      const withSeq = rankedRaw.filter((r) => r.seq !== null);
+      let slope = 0, intercept = 0;
+      if (withSeq.length >= 4) {
+        const xs = withSeq.map((r) => (r.seq as number) / maxSeq);
+        const ys = withSeq.map((r) => r.mean);
+        const xBar = xs.reduce((a, b) => a + b, 0) / xs.length;
+        const yBar = ys.reduce((a, b) => a + b, 0) / ys.length;
+        const num = xs.reduce((s, x, i) => s + (x - xBar) * ((ys[i] ?? yBar) - yBar), 0);
+        const den = xs.reduce((s, x) => s + (x - xBar) * (x - xBar), 0);
+        slope = den > 0 ? num / den : 0;
+        intercept = yBar - slope * xBar;
+      }
+      // Residual std dev of the fit, so "well above" is relative to how noisy
+      // this particular route's delay-vs-position relationship actually is,
+      // rather than a fixed number of seconds that would flag every stop on
+      // a generally-late route and none on a generally-punctual one.
+      const residuals = withSeq.map((r) => r.mean - (intercept + slope * ((r.seq as number) / maxSeq)));
+      const residMean = residuals.reduce((a, b) => a + b, 0) / (residuals.length || 1);
+      const residSd =
+        residuals.length > 1
+          ? Math.sqrt(residuals.reduce((s, e) => s + (e - residMean) * (e - residMean), 0) / (residuals.length - 1))
+          : 0;
+
+      const ranked = rankedRaw
+        .map((r) => {
+          const predicted = r.seq === null ? null : intercept + slope * (r.seq / maxSeq);
+          const residual = predicted === null ? null : r.mean - predicted;
+          return {
+            id: r.id,
+            name: r.name,
+            n: r.n,
+            mean: round(r.mean),
+            pctLate: r.pctLate,
+            seq: r.seq,
+            seqOf: r.seq === null ? null : maxSeq,
+            // Flagged only when there's enough spread in the fit to judge
+            // "surprising" at all (residSd > 0) and the stop sits at least
+            // 1.5 residual-SDs above the trend -- comfortably past ordinary
+            // route-to-route noise, short of an arbitrary round number.
+            flagged: residual !== null && residSd > 0 && residual > 1.5 * residSd,
+          };
+        })
         .sort((a, b) => a.pctLate - b.pctLate);
       const best = ranked.slice(0, 5);
       const worst = ranked.slice(-5).reverse();

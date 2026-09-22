@@ -107,6 +107,12 @@ const EnvSchema = z.object({
   HEALTHCHECK_URL: z.string().default(""),
   HEALTHCHECK_TIMEOUT_MS: intFromEnv(5_000),
 
+  // Empty disables the push entirely -- same pattern as HEALTHCHECK_URL, so a
+  // worker with no live-status configured behaves exactly as it always has.
+  LIVE_STATUS_URL: z.string().default(""),
+  LIVE_STATUS_TOKEN: z.string().default(""),
+  LIVE_STATUS_PUSH_INTERVAL_MS: intFromEnv(120_000),
+
   LOG_LEVEL: z
     .enum(["trace", "debug", "info", "warn", "error", "fatal"])
     .default("info"),
@@ -151,6 +157,7 @@ export type Config = {
   };
   timezone: string;
   healthcheck: { url: string; timeoutMs: number };
+  liveStatus: { url: string; token: string; pushIntervalMs: number };
   log: { level: string; format: "json" | "pretty" };
 };
 
@@ -234,6 +241,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     },
     timezone: e.AGENCY_TIMEZONE,
     healthcheck: { url: e.HEALTHCHECK_URL, timeoutMs: e.HEALTHCHECK_TIMEOUT_MS },
+    liveStatus: {
+      url: e.LIVE_STATUS_URL,
+      token: e.LIVE_STATUS_TOKEN,
+      pushIntervalMs: e.LIVE_STATUS_PUSH_INTERVAL_MS,
+    },
     log: { level: e.LOG_LEVEL, format: e.LOG_FORMAT },
   };
 }

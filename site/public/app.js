@@ -17,6 +17,16 @@
 const DAY_LABEL = { 0: "Weekdays", 1: "Saturday", 2: "Sunday" };
 const LATE_THRESHOLD_MIN = 4;
 
+// Live pulse: the one part of this static site that is actually live. See
+// workers/live-status/README.md for why a Worker exists at all and how its
+// free-tier budget holds up. Empty string means the pulse silently doesn't
+// render -- same "absence disables the feature" pattern as the server-side
+// healthcheck config, and it's ALSO the state until the Worker is actually
+// deployed (workers/live-status/README.md's one-time setup) and this
+// placeholder is replaced with the real *.workers.dev URL it prints out.
+const LIVE_STATUS_URL = ""; // TODO: fill in after `wrangler deploy`
+const LIVE_POLL_MS = 30_000; // matches the real collector's TripUpdates cadence
+
 const $ = (sel) => document.querySelector(sel);
 const view = $("#view");
 
@@ -144,7 +154,81 @@ function bannerHtml(d) {
     <p class="tiny muted">${esc(generated)}</p>`;
 }
 
+/* ------------------------------------------------------------- live pulse */
+
+/**
+ * "Is this actually running right now" -- the one live element on an
+ * otherwise static, once-nightly site. See workers/live-status/README.md.
+ *
+ * Deliberately not a dashboard widget: no numbers-in-boxes. A thin animated
+ * waveform plus one line of text is meant to read as a pulse, not a stat.
+ * Silently absent when LIVE_STATUS_URL is unset or unreachable -- this is
+ * cosmetic, and a broken or missing pulse must never look like an error.
+ */
+function pulseHtml() {
+  // 24 bars is arbitrary but plentiful enough that the CSS animation (which
+  // staggers each bar's phase) reads as a continuous wave rather than a
+  // handful of blinking segments.
+  const bars = Array.from({ length: 24 }, (_, i) => `<span class="pbar" style="--i:${i}"></span>`).join("");
+  return `
+    <div class="pulse" id="pulse" aria-live="polite">
+      <div class="pulse-wave" aria-hidden="true">${bars}</div>
+      <p class="pulse-text muted tiny" id="pulseText">Connecting to the live collector…</p>
+    </div>`;
+}
+
+/** Human "updated Ns ago", recomputed client-side so it visibly counts up. */
+function agoLabel(ms) {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 5) return "just now";
+  if (s < 60) return `${s}s ago`;
+  return `${Math.round(s / 60)}m ago`;
+}
+
+function startPulse() {
+  const el = $("#pulse");
+  if (!el || !LIVE_STATUS_URL) { el?.remove(); return; }
+  let last = null; // last successfully fetched status, for the ticking clock
+
+  function paintText() {
+    const t = $("#pulseText");
+    if (!t) return;
+    if (last === null) return;
+    if (!last.available) { t.textContent = "Collector status unavailable."; return; }
+    t.textContent =
+      `${last.busesTracked} bus${last.busesTracked === 1 ? "" : "es"} tracked right now · ` +
+      `${last.rowsLastPoll.toLocaleString()} arrivals in the last poll · updated ${agoLabel(Date.parse(last.lastPollAt))}`;
+  }
+
+  async function fetchStatus() {
+    try {
+      const r = await fetch(LIVE_STATUS_URL, { cache: "no-store" });
+      if (!r.ok) throw new Error(String(r.status));
+      last = await r.json();
+      el.classList.toggle("stale", !last.available);
+    } catch {
+      // A missed fetch (offline, Worker briefly down) leaves the last known
+      // status on screen rather than blanking it -- a stale pulse still reads
+      // as "was alive recently", which is more honest than flashing an error
+      // for what is very likely a transient network blip.
+      el.classList.add("stale");
+    }
+    paintText();
+  }
+
+  fetchStatus();
+  const dataTimer = setInterval(fetchStatus, LIVE_POLL_MS);
+  const clockTimer = setInterval(paintText, 5_000);
+  // Cleared on the next SPA navigation so a background timer from the home
+  // screen doesn't keep firing (and re-querying a removed #pulseText) after
+  // the visitor has moved to a stop or route page.
+  pulseCleanup = () => { clearInterval(dataTimer); clearInterval(clockTimer); };
+}
+
+let pulseCleanup = null;
+
 function renderHome() {
+  if (pulseCleanup) { pulseCleanup(); pulseCleanup = null; }
   const ready = INDEX.stops.filter((s) => s.usable).length;
   const readyRoutes = (INDEX.routes || []).filter((r) => r.usable).length;
 
@@ -155,6 +239,7 @@ function renderHome() {
     <div class="hero">
       <h1>Is my bus late?</h1>
       <p class="lede">See how often Madison Metro actually runs on time — by route or by stop.</p>
+      ${pulseHtml()}
 
       <div class="entry">
         <button class="entry-btn" id="pickRoute">
@@ -205,6 +290,7 @@ function renderHome() {
   $("#pickStop").addEventListener("click", () => { state.mode = "stop"; paintPicker(); $("#picker").scrollIntoView({ behavior: "smooth", block: "start" }); });
 
   paintPicker();
+  startPulse();
 }
 
 function routePickerHtml(readyRoutes) {
@@ -362,6 +448,7 @@ function combineCells(cells) {
 }
 
 async function renderStop(id) {
+  if (pulseCleanup) { pulseCleanup(); pulseCleanup = null; }
   view.innerHTML = `<p class="muted"><span class="spinner"></span> Loading stop…</p>`;
   let data;
   try {
@@ -562,11 +649,19 @@ function cellCard(c, state) {
  * Stops with no data (n=0, mean=null) are plotted as gaps, not zeros -- a
  * missing observation is not the same as "on time", and drawing it as 0
  * would understate the delay trend right where data happens to be thin.
+ *
+ * INTERACTION: tap-to-select with a persistent label, not a hover tooltip.
+ * Hover doesn't exist on touch, and most visitors here are on a phone at a
+ * bus stop -- a tooltip that vanishes the instant a finger lifts is useless
+ * to them. Each dot is a real <button> (keyboard- and screen-reader
+ * reachable, unlike a bare SVG circle) with a touch target padded well past
+ * its visible radius. Desktop pointer users get hover as a bonus preview via
+ * plain CSS (:hover), never as the only way to see a value.
  */
-function profileSvg(stops) {
+function profileSvg(stops, headsign) {
   const W = Math.max(640, stops.length * 14), H = 170, padL = 8, padR = 8, padT = 12, padB = 14;
   const withData = stops.filter((s) => s.mean !== null);
-  if (withData.length < 2) return `<p class="small muted">Not enough data yet to chart this direction.</p>`;
+  if (withData.length < 2) return { html: `<p class="small muted">Not enough data yet to chart this direction.</p>`, bind: () => {} };
   const maxAbs = Math.max(60, ...withData.map((s) => Math.abs(s.mean)));
   const innerW = W - padL - padR, innerH = H - padT - padB;
   const x = (i) => padL + (stops.length === 1 ? innerW / 2 : (i / (stops.length - 1)) * innerW);
@@ -582,23 +677,92 @@ function profileSvg(stops) {
   });
 
   const zeroY = y(0).toFixed(1);
+
+  // foreignObject hosts real <button> elements inside the SVG so each dot is
+  // a proper focusable, tappable control rather than a shape with a click
+  // listener bolted on -- screen readers and keyboard nav get it for free.
   const dots = stops
-    .map((s, i) => (s.mean === null ? "" : `<circle cx="${x(i).toFixed(1)}" cy="${y(s.mean).toFixed(1)}" r="2.5" fill="var(--ink)"></circle>`))
+    .map((s, i) => {
+      if (s.mean === null) return "";
+      const cx = x(i), cy = y(s.mean);
+      return `
+        <g class="pdot-g" data-idx="${i}">
+          <circle class="pdot" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="3.5"></circle>
+          <foreignObject x="${(cx - 11).toFixed(1)}" y="${(cy - 11).toFixed(1)}" width="22" height="22">
+            <button class="pdot-hit" data-idx="${i}" aria-label="${esc(s.name || s.id)}, stop ${i + 1} of ${stops.length}, ${esc(delayPhrase(s.mean).text)}"></button>
+          </foreignObject>
+        </g>`;
+    })
     .join("");
 
-  return `
+  const html = `
     <div class="profile-wrap">
-      <svg class="profile-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img"
+      <svg class="profile-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" id="profileSvg"
            aria-label="Average delay by stop position along the route, ${withData.length} stops with data">
         <line x1="${padL}" y1="${zeroY}" x2="${W - padR}" y2="${zeroY}" stroke="var(--line)" stroke-width="1"></line>
         <path d="${d.trim()}" fill="none" stroke="var(--ink)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></path>
         ${dots}
       </svg>
     </div>
-    <p class="profile-note">Each dot is one stop, left to right in schedule order. The line is on time; above is late, below is early.</p>`;
+    <p class="profile-note">Tap a stop for detail. Left to right is schedule order; the line is on time, above is late, below is early.</p>
+    <div id="profileDetail" class="profile-detail"></div>`;
+
+  function detailHtml(i) {
+    const s = stops[i];
+    if (s.mean === null) return `<p class="small muted">No data yet for ${esc(s.name || s.id)}.</p>`;
+    const phrase = delayPhrase(s.mean);
+    const lo = delayPhrase(s.meanLo).text, hi = delayPhrase(s.meanHi).text;
+    return `
+      <div class="card profile-card">
+        <h3>Stop ${i + 1} of ${stops.length}${headsign ? ` · towards ${esc(headsign)}` : ""}</h3>
+        <p class="headline">${esc(s.name || s.id)}</p>
+        <p class="headline-sub">Usually <span class="hi ${phrase.cls}">${esc(phrase.text)}</span> here (95% range: ${esc(lo)} to ${esc(hi)})</p>
+        <p class="counts">${s.n.toLocaleString()} arrival${s.n === 1 ? "" : "s"} recorded at this position</p>
+      </div>`;
+  }
+
+  function bind() {
+    const svg = $("#profileSvg");
+    const detail = $("#profileDetail");
+    if (!svg || !detail) return;
+    svg.querySelectorAll(".pdot-hit").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const i = Number(btn.dataset.idx);
+        svg.querySelectorAll(".pdot-g").forEach((g) => g.classList.toggle("selected", Number(g.dataset.idx) === i));
+        detail.innerHTML = detailHtml(i);
+      });
+    });
+  }
+
+  return { html, bind };
+}
+
+/**
+ * One row in the best/worst stops ranking.
+ *
+ * Position along the route is shown alongside delay because delay genuinely
+ * accumulates down a route (see the profile chart) -- so "3rd worst stop" at
+ * position 80 of 85 is expected and not very interesting, while the same
+ * rank at position 12 of 85 is a real anomaly. The "worse than expected"
+ * badge is exactly that second case, computed at export time (see
+ * export-site.ts) as a stop sitting well above the route's own delay-vs-
+ * position trend line, not an arbitrary fixed cutoff.
+ */
+function rankRow(s, cls) {
+  const pos = s.seq !== null ? `Stop ${s.seq} of ${s.seqOf}` : "Position unknown";
+  const flag = s.flagged ? `<span class="flag-badge">worse than expected here</span>` : "";
+  return `
+    <li>
+      <span>
+        <span class="rn">${esc(s.name)}</span>
+        <span class="rn-sub">${esc(pos)} · ${s.n.toLocaleString()} arrivals${flag}</span>
+      </span>
+      <span class="rv ${cls}">${s.pctLate.toFixed(0)}%</span>
+    </li>`;
 }
 
 async function renderRoute(id) {
+  if (pulseCleanup) { pulseCleanup(); pulseCleanup = null; }
   view.innerHTML = `<p class="muted"><span class="spinner"></span> Loading route…</p>`;
   let data;
   try {
@@ -633,6 +797,8 @@ async function renderRoute(id) {
           `<button class="tab" role="tab" aria-selected="${p.direction === state.dir}" data-dir="${p.direction}">Direction ${p.direction === 0 ? "A" : "B"}</button>`).join("")}</div>`
       : "";
 
+    const profile = dirEntry ? profileSvg(dirEntry.stops, dirEntry.headsign) : { html: "", bind: () => {} };
+
     const hourRows = data.hours.filter((h) => h.d === state.day).sort((a, b) => a.h - b.h);
     const byHourBars = hourRows.length
       ? `<div class="hours">${hourRows.map((h) => `
@@ -655,16 +821,18 @@ async function renderRoute(id) {
 
       <h2 style="margin-top:24px">Delay along the route</h2>
       ${dirTabs}
-      ${dirEntry ? profileSvg(dirEntry.stops) : ""}
+      ${profile.html}
 
       <div class="two-col">
         <div>
           <h2>Best stops</h2>
-          <ul class="rank-list">${data.best.map((s) => `<li><span class="rn">${esc(s.name)}</span><span class="rv ontime">${s.pctLate.toFixed(0)}%</span></li>`).join("")}</ul>
+          <p class="tiny muted" style="margin:-4px 0 8px">20+ arrivals recorded</p>
+          <ul class="rank-list">${data.best.map((s) => rankRow(s, "ontime")).join("")}</ul>
         </div>
         <div>
           <h2>Worst stops</h2>
-          <ul class="rank-list">${data.worst.map((s) => `<li><span class="rn">${esc(s.name)}</span><span class="rv late">${s.pctLate.toFixed(0)}%</span></li>`).join("")}</ul>
+          <p class="tiny muted" style="margin:-4px 0 8px">20+ arrivals recorded</p>
+          <ul class="rank-list">${data.worst.map((s) => rankRow(s, "late")).join("")}</ul>
         </div>
       </div>
 
@@ -675,6 +843,7 @@ async function renderRoute(id) {
       b.addEventListener("click", () => { state.day = Number(b.dataset.day); paint(); }));
     view.querySelectorAll("[data-dir]").forEach((b) =>
       b.addEventListener("click", () => { state.dir = Number(b.dataset.dir); paint(); }));
+    profile.bind();
   }
   paint();
 }
