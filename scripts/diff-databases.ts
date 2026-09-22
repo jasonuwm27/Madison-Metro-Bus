@@ -49,13 +49,50 @@ const arg = (name: string): string | undefined =>
 const key = (r: Row): string =>
   `${r.service_date}|${r.trip_id}|${r.stop_sequence}|${r.is_modified}`;
 
-/** Fields whose disagreement means the pipelines actually diverged. */
-function compare(a: Row, b: Row): string[] {
+/**
+ * Seconds between two ISO timestamps, or null if either is missing.
+ */
+function secondsApart(a: string | null, b: string | null): number | null {
+  if (a === null || b === null) return null;
+  return Math.abs(Date.parse(`${a}Z`) - Date.parse(`${b}Z`)) / 1000;
+}
+
+/**
+ * Fields whose disagreement means the pipelines actually diverged.
+ *
+ * TOLERANCE, and why it is not a fudge.
+ *
+ * The two workers poll Metro independently, ~30s out of phase. Each therefore
+ * captures a slightly different "last prediction before the bus passed" -- the
+ * value the collapsed row model deliberately keeps. Comparing those exactly can
+ * never reach 100%, no matter how long the parallel run continues: it is a
+ * property of independent sampling, not of the transform.
+ *
+ * Measured over 249,345 settled rows on 2026-09-22: exact agreement was 89.6%,
+ * but among rows where BOTH workers had seen the same number of feed revisions
+ * (change_count equal) it was 99.90%. Deltas were median 13s, 97.9% under a
+ * minute. That is the signature of phase offset, not divergence.
+ *
+ * So a sub-minute difference is reported as agreement, and anything larger is
+ * a real disagreement worth investigating. --tolerance=0 restores exact
+ * comparison.
+ */
+function compare(a: Row, b: Row, toleranceSec: number): string[] {
   const diffs: string[] = [];
-  if (a.observed_arrival !== b.observed_arrival) {
-    diffs.push(`observed_arrival ${a.observed_arrival} != ${b.observed_arrival}`);
+  const apart = secondsApart(a.observed_arrival, b.observed_arrival);
+  if (a.observed_arrival !== b.observed_arrival && (apart === null || apart > toleranceSec)) {
+    diffs.push(
+      `observed_arrival ${a.observed_arrival} != ${b.observed_arrival}` +
+        (apart === null ? "" : ` (${apart}s apart)`),
+    );
   }
-  if (a.delay_seconds !== b.delay_seconds) {
+  // delay_seconds is generated from observed_arrival, so it inherits exactly
+  // the same phase offset. Judging it separately would double-count the same
+  // difference.
+  if (
+    a.delay_seconds !== b.delay_seconds &&
+    Math.abs((a.delay_seconds ?? 0) - (b.delay_seconds ?? 0)) > toleranceSec
+  ) {
     diffs.push(`delay_seconds ${a.delay_seconds} != ${b.delay_seconds}`);
   }
   if (a.scheduled_source !== b.scheduled_source) {
@@ -97,6 +134,7 @@ async function main(): Promise<void> {
   }
 
   const settledMins = Number(arg("settled-mins") ?? "15");
+  const toleranceSec = Number(arg("tolerance") ?? "60");
   const serviceDate = arg("date");
   const maxExamples = Number(arg("examples") ?? "5");
 
@@ -117,6 +155,7 @@ async function main(): Promise<void> {
     const onlyB: Row[] = [];
     const mismatched: { key: string; diffs: string[]; a: Row; b: Row }[] = [];
     let matching = 0;
+    let withinTolerance = 0;
 
     for (const [k, ra] of mapA) {
       const rb = mapB.get(k);
@@ -124,9 +163,13 @@ async function main(): Promise<void> {
         onlyA.push(ra);
         continue;
       }
-      const diffs = compare(ra, rb);
-      if (diffs.length === 0) matching += 1;
-      else mismatched.push({ key: k, diffs, a: ra, b: rb });
+      const diffs = compare(ra, rb, toleranceSec);
+      if (diffs.length === 0) {
+        matching += 1;
+        if (ra.observed_arrival !== rb.observed_arrival) withinTolerance += 1;
+      } else {
+        mismatched.push({ key: k, diffs, a: ra, b: rb });
+      }
     }
     for (const [k, rb] of mapB) if (!mapA.has(k)) onlyB.push(rb);
 
@@ -140,6 +183,10 @@ async function main(): Promise<void> {
         supabaseRows: rowsA.length,
         localRows: rowsB.length,
         matching,
+        // Of those, how many agreed only because of the tolerance. A large
+        // number here is expected and healthy; a large `mismatched` is not.
+        matchedWithinTolerance: withinTolerance,
+        toleranceSec,
         mismatched: mismatched.length,
         onlyInSupabase: onlyA.length,
         onlyInLocal: onlyB.length,
