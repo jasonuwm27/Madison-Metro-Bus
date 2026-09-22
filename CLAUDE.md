@@ -470,6 +470,50 @@ across independently-polling workers can never reach 100%. A useful diff should
 either compare only rows where `change_count` matches, or treat sub-minute
 deltas as agreement.
 
+## CUTOVER COMPLETE (2026-09-22) -- Supabase retired
+
+Local Postgres on the block volume is now the only database. Supabase is fully
+retired: worker stopped and disabled, config moved to `.env.supabase.retired`
+(loaded by nothing), no active unit or config references it.
+
+Final Supabase snapshot before retirement:
+`busproject-2026-09-22T1702Z.dump`, 17.34 MB, MD5-confirmed in Drive. It holds
+2026-09-15 and 09-16, the two service days local never collected -- the only
+copy of those days outside the raw archive.
+
+**Diff at cutover** (sub-minute tolerance, see below): 255,279 matching, **589
+mismatched (0.23%)**, `onlyInLocal` 7. Remaining mismatches cluster on
+2026-09-17, the day local started mid-day, and are 72-221s apart -- one worker
+still backfilling while the other had settled.
+
+### SELinux bit us during the cutover
+
+Promoting `.env.local` to `.env` produced a file labelled `user_tmp_t`
+(inherited from /tmp when originally staged) while the working files carry
+`system_conf_t`. SELinux is **Enforcing** on this image, so systemd could not
+read it:
+
+    bus-worker-local.service: Failed to load environment files: Permission denied
+    Failed with result 'resources'
+
+Ownership and mode were already correct -- only the SELinux label was wrong.
+Fix: `chcon --reference=.env.local .env`. **Any new file placed under
+/opt/bus/repo via /tmp needs its label checked**, or the unit fails to start
+with a permission error that looks like a mode problem and is not. Collection
+was down ~3 minutes.
+
+### Unit layout after cutover
+
+| Unit | State | Purpose |
+|---|---|---|
+| `bus-worker-local` | enabled, active | the collector (name kept for journal continuity) |
+| `bus-worker` | **disabled** | was Supabase |
+| `bus-rollup`, `bus-partitions`, `bus-drop`, `bus-archive-sync`, `bus-backup`, `bus-backup-verify` | enabled | all read the promoted `.env` |
+| `bus-rollup-local`, `bus-drop-local` | **disabled** | duplicates of the base names |
+| `bus-worker-local-heartbeat` | enabled | data-based liveness |
+
+`bus-drop` now carries `--retain=400` (was 10 for Supabase's cap).
+
 ## Known gaps / next steps
 
 - **Departure-only stops are skipped.** 149 of 6,035 in the sample — trip origin
