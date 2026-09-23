@@ -80,17 +80,25 @@ p{margin:0 0 12px}
 .pulse-text{margin:0;font-variant-numeric:tabular-nums}
 @media (prefers-reduced-motion:reduce){.pbar{animation:none;height:50%}}
 
-/* ---- entry points: route or stop, side by side, the primary choice ---- */
-.entry{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
-.entry-btn{
-  display:flex;flex-direction:column;align-items:flex-start;gap:6px;width:100%;
-  min-height:88px;padding:16px 16px;border:1px solid var(--line);border-radius:var(--radius);
-  background:var(--card);color:inherit;cursor:pointer;text-align:left;
+/* ---- route tiles: routes as a real, prominent entry point -------------
+   A grid of bare route numbers, not cards with copy -- someone who "takes
+   the 80" recognises "80" instantly, and a dense grid fits far more routes
+   above the fold than a list of rows ever could. */
+.route-grid{
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(56px,1fr));gap:8px;
+  margin-top:12px;margin-bottom:10px;
 }
-.entry-btn:active{border-color:var(--ink)}
-.entry-btn .ic{font-size:20px;line-height:1;opacity:.8}
-.entry-btn .et{font-weight:600;font-size:15.5px}
-.entry-btn .es{font-size:12.5px;color:var(--muted)}
+.route-tile{
+  display:flex;align-items:center;justify-content:center;min-height:52px;
+  border:1px solid var(--line);border-radius:var(--radius);background:var(--card);
+  color:inherit;text-decoration:none;font-weight:700;font-size:15px;
+  font-variant-numeric:tabular-nums;
+}
+.route-tile:active{border-color:var(--ink)}
+
+/* ---- recent stops: localStorage, no accounts -- learned, not configured */
+.recent{margin-top:32px}
+
 .locate-btn{
   display:flex;align-items:center;justify-content:center;gap:10px;width:100%;
   min-height:60px;padding:14px 18px;border:0;border-radius:var(--radius);
@@ -119,14 +127,6 @@ input[type=search]{
   background:var(--card);color:var(--ink);
 }
 input[type=search]:focus{outline:2px solid var(--ink);outline-offset:-1px}
-
-/* ---- toggle between stop-search and route-search on the landing page -- */
-.seg{display:flex;border:1px solid var(--line);border-radius:var(--radius);padding:3px;gap:3px;margin-bottom:12px}
-.seg button{
-  flex:1;min-height:40px;border:0;border-radius:calc(var(--radius) - 4px);background:transparent;
-  color:var(--muted);font:600 13.5px/1 system-ui,sans-serif;cursor:pointer;
-}
-.seg button[aria-selected=true]{background:var(--raised);color:var(--ink)}
 
 /* ---- lists: stops and routes ---- */
 .stops{list-style:none;margin:10px 0 0;padding:0}
@@ -340,8 +340,8 @@ footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);font-si
     <!-- SSR-BEGIN -->
     <div class="hero">
       <h1>Is my bus late?</h1>
-      <p class="lede">See how often Madison Metro actually runs on time — by stop, route, and time of day.
-      Collecting since September 15, 2026, 217,411 arrivals recorded so far.</p>
+      <p class="lede">See how often Madison Metro actually runs on time.
+      Collecting since September 15, 2026, 240,113 arrivals recorded so far.</p>
     </div><!-- SSR-END -->
   </main>
 

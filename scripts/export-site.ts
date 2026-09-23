@@ -234,7 +234,7 @@ function renderHeroSsr(
   return `
     <div class="hero">
       <h1>Is my bus late?</h1>
-      <p class="lede">See how often Madison Metro actually runs on time — by stop, route, and time of day.
+      <p class="lede">See how often Madison Metro actually runs on time.
       ${since ? `Collecting since ${esc(since)}, ${totalN.toLocaleString()} arrivals recorded so far.` : ""}</p>
     </div>`;
 }

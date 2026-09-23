@@ -265,96 +265,148 @@ function startPulse() {
 
 let pulseCleanup = null;
 
+/* --------------------------------------------------------- recent stops */
+
+// localStorage, no accounts: most people check the same one or two stops
+// repeatedly, and the site should learn that without asking anyone to sign
+// in for it. Capped at 5 and de-duplicated on write so the list stays a
+// short, genuinely "recent" set rather than an ever-growing history.
+const RECENT_KEY = "bus:recentStops";
+const RECENT_MAX = 5;
+
+function getRecentStopIds() {
+  try {
+    const raw = localStorage.getItem(RECENT_KEY);
+    const ids = raw ? JSON.parse(raw) : [];
+    return Array.isArray(ids) ? ids.filter((id) => typeof id === "string") : [];
+  } catch {
+    // Private browsing, quota exceeded, or a previous version wrote
+    // malformed JSON -- treat as "no history" rather than breaking the page.
+    return [];
+  }
+}
+
+function recordRecentStop(id) {
+  try {
+    const ids = getRecentStopIds().filter((x) => x !== id);
+    ids.unshift(id);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(ids.slice(0, RECENT_MAX)));
+  } catch {
+    // Storage can fail (quota, private mode); losing "recent stops" is
+    // cosmetic, never worth surfacing an error for.
+  }
+}
+
+function recentStopsHtml() {
+  const ids = getRecentStopIds();
+  const byId = new Map(INDEX.stops.map((s) => [s.id, s]));
+  const stops = ids.map((id) => byId.get(id)).filter(Boolean);
+  if (stops.length === 0) return "";
+  return `
+    <div class="recent">
+      <h2>Recent</h2>
+      <ul class="stops">${stops.map(stopRow).join("")}</ul>
+    </div>`;
+}
+
+/* ------------------------------------------------------------ home screen */
+
 function renderHome() {
   if (pulseCleanup) { pulseCleanup(); pulseCleanup = null; }
-  const ready = INDEX.stops.filter((s) => s.usable).length;
-  const readyRoutes = (INDEX.routes || []).filter((r) => r.usable).length;
 
-  // Screen 1: answer "what is this / what do I do" in one glance, then one
-  // clear choice -- route or stop -- as the primary action. Numbers are not
-  // an action, so they move below the fold.
+  // The one-tap case: someone standing at a stop, phone in hand, wants their
+  // stop and nothing else. Geolocation is the biggest, first thing on the
+  // page -- not one option among several -- because for that reader it IS
+  // the whole interaction. Recent stops sit right below it: for a repeat
+  // visitor "the same stop as yesterday" beats even geolocation, since it
+  // works indoors and needs no permission prompt.
   view.innerHTML = `
     <div class="hero">
       <h1>Is my bus late?</h1>
-      <p class="lede">See how often Madison Metro actually runs on time — by route or by stop.</p>
+      <p class="lede">See how often Madison Metro actually runs on time.</p>
       ${pulseHtml()}
 
-      <div class="entry">
-        <button class="entry-btn" id="pickRoute">
-          <span class="ic">🚌</span>
-          <span class="et">By route</span>
-          <span class="es">Know your bus number</span>
-        </button>
-        <button class="entry-btn" id="pickStop">
-          <span class="ic">📍</span>
-          <span class="et">By stop</span>
-          <span class="es">Know where you'll wait</span>
-        </button>
-      </div>
+      <button class="locate-btn" id="near"><span class="ic">📍</span> Stops near me</button>
+      <p class="tiny muted" id="geostatus" style="margin:10px 0 0;min-height:16px"></p>
     </div>
 
-    <div id="picker"></div>
+    <div id="nearResults"></div>
+
+    ${recentStopsHtml()}
+
+    <div class="section">
+      <h2>By route</h2>
+      <p class="small muted" style="margin-top:-4px">Know your bus number? Tap it.</p>
+      <div class="route-grid" id="routeGrid"></div>
+      <button class="btn link-btn" id="moreRoutes" style="margin-top:2px">All routes</button>
+    </div>
+
+    <div class="section">
+      <h2>By stop name</h2>
+      <input type="search" id="q" placeholder="Stop name, e.g. Union South" autocomplete="off"
+             enterkeyhint="search" aria-label="Search stops by name">
+      <ul class="stops" id="results"></ul>
+      <button class="btn link-btn" id="moreStops" style="margin-top:2px">All stops</button>
+    </div>
 
     ${growthSectionHtml(INDEX.dataset, INDEX.growth)}
     ${dataCompletenessHtml(INDEX.dayCoverage)}
     ${bannerHtml({ ...INDEX.dataset, generatedAt: INDEX.generatedAt })}`;
 
-  const state = { mode: "route" };
+  // Route tiles: a fixed-size grid of the busiest usable routes, equal
+  // visual weight to stop search rather than tucked behind a secondary tab.
+  // "All routes" reaches the rest -- most riders take one of a handful of
+  // routes regularly, so the grid covers the common case at a glance.
+  const routes = (INDEX.routes || []).filter((r) => r.usable).sort((a, b) => b.n - a.n);
+  $("#routeGrid").innerHTML = routes.slice(0, 12).map(routeTile).join("");
+  $("#moreRoutes").addEventListener("click", () => renderAllRoutes());
+  $("#moreStops").addEventListener("click", () => renderAllStops());
 
-  function paintPicker() {
-    $("#picker").innerHTML = `
-      <div class="seg" role="tablist" aria-label="Search by">
-        <button role="tab" aria-selected="${state.mode === "route"}" data-mode="route">Routes</button>
-        <button role="tab" aria-selected="${state.mode === "stop"}" data-mode="stop">Stops</button>
-      </div>
-      ${state.mode === "route" ? routePickerHtml(readyRoutes) : stopPickerHtml(ready)}`;
+  $("#near").addEventListener("click", () => locate("#nearResults", "#geostatus"));
+  $("#q").addEventListener("input", (e) => search(e.target.value));
 
-    $("#picker").querySelectorAll("[data-mode]").forEach((b) =>
-      b.addEventListener("click", () => { state.mode = b.dataset.mode; paintPicker(); }));
-
-    if (state.mode === "stop") {
-      $("#near")?.addEventListener("click", locate);
-      $("#q")?.addEventListener("input", (e) => search(e.target.value));
-      const top = INDEX.stops.filter((s) => s.usable).sort((a, b) => b.n - a.n).slice(0, 8);
-      $("#ready").innerHTML = top.map(stopRow).join("");
-    } else {
-      $("#rq")?.addEventListener("input", (e) => searchRoutes(e.target.value));
-      $("#routeList").innerHTML = (INDEX.routes || [])
-        .slice().sort((a, b) => (b.usable - a.usable) || b.n - a.n)
-        .map(routeRow).join("");
-    }
-  }
-
-  $("#pickRoute").addEventListener("click", () => { state.mode = "route"; paintPicker(); $("#picker").scrollIntoView({ behavior: "smooth", block: "start" }); });
-  $("#pickStop").addEventListener("click", () => { state.mode = "stop"; paintPicker(); $("#picker").scrollIntoView({ behavior: "smooth", block: "start" }); });
-
-  paintPicker();
   startPulse();
 }
 
-function routePickerHtml(readyRoutes) {
-  return `
-    <h2>Search routes</h2>
-    <input type="search" id="rq" placeholder="Route number, e.g. 80" autocomplete="off"
-           enterkeyhint="search" aria-label="Search routes by number or name">
-    <ul class="stops" id="routeResults"></ul>
-    <h2 style="margin-top:20px">All routes</h2>
-    <p class="small muted">${readyRoutes.toLocaleString()} of ${(INDEX.routes || []).length.toLocaleString()} routes have enough arrivals to show a figure.</p>
-    <ul class="stops" id="routeList"></ul>`;
+/** One route tile in the landing-screen grid -- a route number, tappable. */
+function routeTile(r) {
+  return `<a class="route-tile" href="/route/${encodeURIComponent(r.id)}">${esc(r.id)}</a>`;
 }
 
-function stopPickerHtml() {
-  return `
-    <button class="locate-btn" id="near" style="margin-top:4px"><span class="ic">📍</span> Find my stop</button>
-    <p class="tiny muted" id="geostatus" style="margin:10px 0 20px;min-height:16px"></p>
+/** Full route list, reached via "All routes" -- the fallback, not the default. */
+function renderAllRoutes() {
+  if (pulseCleanup) { pulseCleanup(); pulseCleanup = null; }
+  const readyRoutes = (INDEX.routes || []).filter((r) => r.usable).length;
+  view.innerHTML = `
+    <p><a href="/" class="small">← Back</a></p>
+    <h2 style="margin-top:10px">All routes</h2>
+    <p class="small muted">${readyRoutes.toLocaleString()} of ${(INDEX.routes || []).length.toLocaleString()} routes have enough arrivals to show a figure.</p>
+    <input type="search" id="rq" placeholder="Route number, e.g. 80" autocomplete="off"
+           enterkeyhint="search" aria-label="Search routes by number or name">
+    <ul class="stops" id="routeList"></ul>`;
+  $("#rq").addEventListener("input", (e) => searchRoutes(e.target.value));
+  $("#routeList").innerHTML = (INDEX.routes || [])
+    .slice().sort((a, b) => (b.usable - a.usable) || b.n - a.n)
+    .map(routeRow).join("");
+}
 
-    <h2>Search stops</h2>
-    <input type="search" id="q" placeholder="Stop name, e.g. Union South" autocomplete="off"
+/** Full stop list, reached via "All stops" -- the fallback, not the default. */
+function renderAllStops() {
+  if (pulseCleanup) { pulseCleanup(); pulseCleanup = null; }
+  const ready = INDEX.stops.filter((s) => s.usable).length;
+  view.innerHTML = `
+    <p><a href="/" class="small">← Back</a></p>
+    <h2 style="margin-top:10px">All stops</h2>
+    <p class="small muted">
+      ${ready.toLocaleString()} of ${INDEX.stops.length.toLocaleString()} stops have enough
+      arrivals to show a figure. The rest are still collecting.
+    </p>
+    <input type="search" id="q2" placeholder="Stop name, e.g. Union South" autocomplete="off"
            enterkeyhint="search" aria-label="Search stops by name">
-    <ul class="stops" id="results"></ul>
-
-    <h2 style="margin-top:20px">Ready now</h2>
-    <ul class="stops" id="ready"></ul>`;
+    <ul class="stops" id="results2"></ul>`;
+  $("#q2").addEventListener("input", (e) => search(e.target.value, "#results2"));
+  const top = INDEX.stops.filter((s) => s.usable).sort((a, b) => b.n - a.n).slice(0, 40);
+  $("#results2").innerHTML = top.map(stopRow).join("");
 }
 
 /** One row in the route picker. */
@@ -394,9 +446,10 @@ function stopRow(s) {
     </a></li>`;
 }
 
-function search(qRaw) {
+function search(qRaw, targetSel = "#results") {
   const q = qRaw.trim().toLowerCase();
-  const el = $("#results");
+  const el = $(targetSel);
+  if (!el) return;
   if (q.length < 2) { el.innerHTML = ""; return; }
   // Token matching, not prefix: stop names are compound ("University at
   // University Bay"), so "bay" must find it.
@@ -411,8 +464,15 @@ function search(qRaw) {
   el.innerHTML = hits.length ? hits.map(stopRow).join("") : `<li class="small muted">No stops match “${esc(qRaw)}”.</li>`;
 }
 
-function locate() {
-  const status = $("#geostatus");
+/**
+ * "Stops near me" -- the whole interaction for the primary use case (someone
+ * standing at a stop, phone in hand). resultsSel/statusSel let this be
+ * called from the home screen; there's currently only one caller, but
+ * keeping it parameterised avoids hard-coding #results/#geostatus twice.
+ */
+function locate(resultsSel, statusSel) {
+  const status = $(statusSel);
+  const results = $(resultsSel);
   if (!navigator.geolocation) { status.textContent = "This browser can't share your location."; return; }
   status.innerHTML = `<span class="spinner"></span> Finding your location…`;
   navigator.geolocation.getCurrentPosition(
@@ -429,9 +489,9 @@ function locate() {
         })
         .sort((a, b) => a._km - b._km)
         .slice(0, 10);
-      status.textContent = `Nearest stops to you:`;
-      $("#results").innerHTML = near.map(stopRow).join("");
-      $("#results").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      status.textContent = near.length ? `Nearest stops to you:` : `No stops found nearby.`;
+      results.innerHTML = `<ul class="stops">${near.map(stopRow).join("")}</ul>`;
+      results.scrollIntoView({ behavior: "smooth", block: "nearest" });
     },
     (err) => {
       status.textContent =
@@ -498,6 +558,7 @@ async function renderStop(id) {
     view.innerHTML = `<p>Couldn't load that stop. <a href="/">Back to search</a></p>`;
     return;
   }
+  recordRecentStop(id);
 
   // Only offer day types that actually exist in the data. A Saturday tab that
   // can only ever say "no data" is worse than no tab.
