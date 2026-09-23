@@ -288,6 +288,31 @@ details.grid-toggle[open]>summary::before{transform:rotate(90deg)}
 .growth-svg{display:block;width:100%;height:auto}
 .growth-caption{font-size:11.5px;color:var(--muted);margin-top:8px;text-align:right}
 
+/* ---- data completeness: coverage per day, gaps explained not hidden ----
+   Three states: gap-known (a diagnosed cause -- VM reboot, agency outage --
+   shown as ordinary, not alarming, since it's understood and excluded from
+   reliability figures already), gap-unexplained (low coverage with no
+   diagnosis yet -- the one state that should read as "needs attention"),
+   gap-none (normal day, no annotation needed). */
+.coverage-list{display:flex;flex-direction:column;gap:2px;margin-top:12px}
+.cov-row{
+  display:grid;grid-template-columns:52px 1fr 40px;align-items:center;gap:10px;
+  padding:8px 0;border-bottom:1px solid var(--line);
+}
+.cov-date{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.cov-bar-track{height:8px;border-radius:999px;background:var(--raised);overflow:hidden}
+.cov-bar-fill{height:100%;border-radius:999px;background:var(--ontime)}
+.cov-pct{font-size:12.5px;font-weight:600;text-align:right;font-variant-numeric:tabular-nums}
+.cov-row.gap-known .cov-bar-fill{background:var(--muted)}
+.cov-row.gap-known .cov-pct{color:var(--muted)}
+.cov-row.gap-unexplained .cov-bar-fill{background:var(--late)}
+.cov-row.gap-unexplained .cov-pct{color:var(--late)}
+.cov-reason{
+  grid-column:1 / -1;margin:2px 0 0;font-size:12px;color:var(--muted);
+  line-height:1.4;
+}
+.cov-row.gap-unexplained .cov-reason{color:var(--late)}
+
 /* ---- dataset banner: demoted to a footnote of credibility ---- */
 .banner{
   border-top:1px solid var(--line);padding-top:16px;margin-top:14px;

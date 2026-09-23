@@ -133,6 +133,46 @@ function growthSectionHtml(d, growth) {
     </section>`;
 }
 
+/**
+ * Data completeness: coverage by day, with known collection gaps annotated.
+ *
+ * Framed as a feature, not an apology -- an agency-side feed outage the
+ * archive can PROVE happened (not just suspect) is exactly what an
+ * independent archive is for. Reliability figures elsewhere on the site
+ * already exclude these flagged days server-side (see
+ * build_stop_route_hour_stats in sql/004_stats.sql), so a bad-collection
+ * day never quietly reads as bad service -- this section is what makes
+ * that exclusion visible and explained, not just silently applied.
+ */
+function dataCompletenessHtml(dayCoverage) {
+  if (!dayCoverage || dayCoverage.length === 0) return "";
+  const rows = dayCoverage.map((d) => {
+    const pct = d.coveragePct;
+    const flagged = d.knownGapReason !== null;
+    // Unflagged-but-low is a real signal worth a visually distinct state --
+    // it means something happened that hasn't been diagnosed yet, which is
+    // different from "explained" (flagged) and different from "normal".
+    const cls = flagged ? "gap-known" : pct < 85 ? "gap-unexplained" : "gap-none";
+    const label = new Date(d.date + "T12:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    return `
+      <div class="cov-row ${cls}">
+        <span class="cov-date">${esc(label)}</span>
+        <div class="cov-bar-track"><div class="cov-bar-fill" style="width:${Math.max(2, pct)}%"></div></div>
+        <span class="cov-pct">${pct.toFixed(0)}%</span>
+        ${flagged ? `<p class="cov-reason">${esc(d.knownGapReason)}</p>` : cls === "gap-unexplained" ? `<p class="cov-reason muted">Low coverage, not yet diagnosed.</p>` : ""}
+      </div>`;
+  }).join("");
+  return `
+    <section class="section" aria-label="Data completeness">
+      <h2>Data completeness</h2>
+      <p class="small muted" style="margin-top:-4px">
+        How much of the scheduled service this archive actually captured, per day. Reliability figures elsewhere
+        on this site exclude days with a known collection gap, so a bad day here never reads as a bad bus.
+      </p>
+      <div class="coverage-list">${rows}</div>
+    </section>`;
+}
+
 function bannerHtml(d) {
   const since = new Date(d.firstServiceDate + "T12:00:00Z").toLocaleDateString(undefined, {
     day: "numeric", month: "long", year: "numeric",
@@ -256,6 +296,7 @@ function renderHome() {
     <div id="picker"></div>
 
     ${growthSectionHtml(INDEX.dataset, INDEX.growth)}
+    ${dataCompletenessHtml(INDEX.dayCoverage)}
     ${bannerHtml({ ...INDEX.dataset, generatedAt: INDEX.generatedAt })}`;
 
   const state = { mode: "route" };

@@ -347,6 +347,25 @@ async function main(): Promise<void> {
       n: Number(r.n),
     }));
 
+    // ---- data completeness --------------------------------------------------
+    // This is a feature, not an apology: the archive proving a Metro-side
+    // feed outage happened is exactly what this project exists to do.
+    // Rebuilt before reading so a day collected since the last export shows
+    // up immediately rather than waiting for tomorrow's rebuild.
+    await sql`select build_day_coverage_all()`;
+    const coverageRows = await sql<
+      { service_date: unknown; coverage_pct: number; known_gap_reason: string | null }[]
+    >`
+      select service_date, coverage_pct, known_gap_reason
+      from day_coverage
+      order by service_date
+    `;
+    const dayCoverage = coverageRows.map((r) => ({
+      date: toDateOnly(r.service_date),
+      coveragePct: r.coverage_pct,
+      knownGapReason: r.known_gap_reason,
+    }));
+
     // ---- route tier ----------------------------------------------------------
     const feedForRoutes = sql`
       select id from gtfs_feed_versions where load_completed_at is not null order by loaded_at desc limit 1
@@ -686,6 +705,7 @@ async function main(): Promise<void> {
       dataset: summary,
       thresholds: { confident: N_CONFIDENT, provisional: N_PROVISIONAL },
       growth: growthSeries,
+      dayCoverage,
       stops: stops.map((s) => ({
         id: s.stop_id,
         name: s.stop_name,

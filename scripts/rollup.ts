@@ -60,6 +60,35 @@ async function main(): Promise<void> {
       );
     }
 
+    // ---- coverage check -----------------------------------------------------
+    // Runs once per invocation, on the most recent date just rolled up (not
+    // every backfilled date), so a --backfill run doesn't spam alerts for
+    // days already known and long since investigated.
+    //
+    // Threshold and reasoning match scripts/weekly-summary.ts: 85% cleanly
+    // separates every clean day measured so far (94%+) from every day with a
+    // diagnosed or undiagnosed shortfall (83% or below). This check exists
+    // SEPARATELY from the weekly summary so a gap is caught the next morning,
+    // not up to six days later -- the whole point raised after the Sept 17
+    // incident sat undiscovered for a week.
+    const latestDate = dates.at(-1);
+    if (latestDate !== undefined) {
+      await sql`select build_day_coverage_all()`;
+      const [coverage] = await sql<{ coverage_pct: number; known_gap_reason: string | null }[]>`
+        select coverage_pct, known_gap_reason from day_coverage where service_date = ${latestDate}::date
+      `;
+      if (coverage !== undefined && coverage.known_gap_reason === null && coverage.coverage_pct < 85) {
+        log.error(
+          { serviceDate: latestDate, coveragePct: coverage.coverage_pct },
+          "coverage below threshold with no diagnosed cause",
+        );
+        // Non-zero exit fails the systemd unit, which fails HC_ROLLUP's ping --
+        // reusing the existing healthcheck rather than adding a new one that
+        // could itself be forgotten in a future healthcheck cleanup.
+        process.exitCode = 1;
+      }
+    }
+
     if (has("monthly")) {
       const month = arg("monthly") ?? today.slice(0, 7);
       const started = Date.now();

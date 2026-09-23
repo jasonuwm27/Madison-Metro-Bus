@@ -103,6 +103,44 @@ async function main(): Promise<void> {
       ok: true,
     });
 
+    // ---- coverage ----------------------------------------------------------
+    // Checks the most recently COMPLETE day (yesterday), not today -- a day
+    // still in progress always looks like a gap, since it hasn't happened
+    // yet. Threshold of 85%: every clean day measured so far sits at 94%+,
+    // every day with a diagnosed collection gap (VM reboot, agency feed
+    // outage) or an unexplained shortfall sits at 83% or below -- 85% sits
+    // in the gap between those two populations with margin on both sides,
+    // not at an arbitrary round number.
+    await sql`select build_day_coverage_all()`;
+    const [lastDay] = await sql<
+      { service_date: Date; coverage_pct: number; known_gap_reason: string | null }[]
+    >`
+      select service_date, coverage_pct, known_gap_reason
+      from day_coverage
+      where service_date < current_date
+      order by service_date desc
+      limit 1
+    `;
+    const coveragePct = lastDay?.coverage_pct ?? null;
+    const isKnownGap = lastDay?.known_gap_reason != null;
+    checks.push({
+      label: "Coverage (yesterday)",
+      value:
+        lastDay === undefined
+          ? "no data"
+          : `${coveragePct}% on ${lastDay.service_date.toISOString().slice(0, 10)}` +
+            (isKnownGap ? " (known gap, see site)" : ""),
+      // A day already flagged with a diagnosed cause doesn't need to alert
+      // again every week just for existing -- the point of this check is to
+      // catch the NEXT undiagnosed gap, not to keep re-reporting old ones
+      // that are already understood and excluded from reliability figures.
+      ok: lastDay === undefined || isKnownGap || coveragePct === null || coveragePct >= 85,
+      note:
+        lastDay !== undefined && !isKnownGap && coveragePct !== null && coveragePct < 85
+          ? "below 85% with no diagnosed cause -- check day_coverage and the raw archive"
+          : undefined,
+    });
+
     // ---- poll health -----------------------------------------------------
     const runs = await sql<{ feed: string; polls: number; fails: number }[]>`
       select feed, count(*)::int polls, count(*) filter (where not ok)::int fails

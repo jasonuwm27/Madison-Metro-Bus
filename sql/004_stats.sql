@@ -127,6 +127,14 @@ begin
     count(distinct r.service_date)::smallint         as service_days
   from rollup_daily r
   where r.service_date >= v_cutoff
+    -- Excludes days with a diagnosed collection gap (VM reboot, agency feed
+    -- outage) from the reliability figures. Those days measure how well the
+    -- COLLECTOR worked, not how well the BUSES ran, and mixing the two would
+    -- let a bad-collection day masquerade as bad service.
+    and not exists (
+      select 1 from day_coverage dc
+      where dc.service_date = r.service_date and dc.known_gap_reason is not null
+    )
   group by r.stop_id, r.route_id, r.hour_of_day, r.day_type;
 
   delete from stop_route_hour_stats;
