@@ -320,11 +320,27 @@ function renderHome() {
   // the whole interaction. Recent stops sit right below it: for a repeat
   // visitor "the same stop as yesterday" beats even geolocation, since it
   // works indoors and needs no permission prompt.
+  //
+  // The combined search box sits directly under the subtitle, ABOVE the
+  // geolocation button: it's the fastest path for anyone who already knows
+  // what they're looking for (a route number or a stop name) and don't want
+  // to wait on a location prompt or scan a grid. Auto-focused so typing
+  // works immediately on desktop; harmless on mobile, where focus doesn't
+  // pop the keyboard without a user gesture anyway.
   view.innerHTML = `
     <div class="hero">
       <h1>Is my bus late?</h1>
       <p class="lede">See how often Madison Metro actually runs on time.</p>
       ${pulseHtml()}
+
+      <div class="omnisearch">
+        <input type="search" id="omniq" class="omniq" autofocus
+               placeholder="Search by route number or stop name…" autocomplete="off"
+               enterkeyhint="search" aria-label="Search by route number or stop name">
+        <ul class="stops" id="omniResults"></ul>
+      </div>
+
+      <div class="pill-row" id="quickRoutes" aria-label="Common routes"></div>
 
       <button class="locate-btn" id="near"><span class="ic">📍</span> Stops near me</button>
       <p class="tiny muted" id="geostatus" style="margin:10px 0 0;min-height:16px"></p>
@@ -362,10 +378,58 @@ function renderHome() {
   $("#moreRoutes").addEventListener("click", () => renderAllRoutes());
   $("#moreStops").addEventListener("click", () => renderAllStops());
 
+  // Quick-select pills: the 5 busiest routes, one tap straight to the route
+  // page. Same "usable" + busiest-first ordering as the grid below, just a
+  // shorter slice, so the two never suggest a different "top route".
+  $("#quickRoutes").innerHTML = routes.slice(0, 5).map(routePill).join("");
+
   $("#near").addEventListener("click", () => locate("#nearResults", "#geostatus"));
   $("#q").addEventListener("input", (e) => search(e.target.value));
+  $("#omniq").addEventListener("input", (e) => omniSearch(e.target.value));
 
   startPulse();
+}
+
+/** One quick-select pill under the search box -- a route number, tappable. */
+function routePill(r) {
+  return `<a class="pill-btn" href="/route/${encodeURIComponent(r.id)}">Route ${esc(r.id)}</a>`;
+}
+
+/**
+ * Combined route + stop search for the omnisearch box.
+ *
+ * Routes are matched first and shown first: someone typing "80" wants
+ * Route 80, not the 25 stops that happen to have "80" in an address.
+ * Numeric-looking queries in particular are almost always a route number.
+ */
+function omniSearch(qRaw) {
+  const q = qRaw.trim().toLowerCase();
+  const el = $("#omniResults");
+  if (!el) return;
+  if (q.length < 1) { el.innerHTML = ""; return; }
+
+  const routeHits = (INDEX.routes || [])
+    .filter((r) => (r.id + " " + (r.name || "")).toLowerCase().includes(q))
+    .sort((a, b) => (b.usable - a.usable) || b.n - a.n)
+    .slice(0, 5);
+
+  let stopHits = [];
+  if (q.length >= 2) {
+    const terms = q.split(/\s+/);
+    stopHits = INDEX.stops
+      .filter((s) => {
+        const hay = (s.name + " " + (s.headsigns || []).join(" ") + " " + s.routes.join(" ")).toLowerCase();
+        return terms.every((t) => hay.includes(t));
+      })
+      .sort((a, b) => (b.usable - a.usable) || b.n - a.n)
+      .slice(0, 8);
+  }
+
+  if (routeHits.length === 0 && stopHits.length === 0) {
+    el.innerHTML = `<li class="small muted">No routes or stops match “${esc(qRaw)}”.</li>`;
+    return;
+  }
+  el.innerHTML = routeHits.map(routeRow).join("") + stopHits.map(stopRow).join("");
 }
 
 /** One route tile in the landing-screen grid -- a route number, tappable. */

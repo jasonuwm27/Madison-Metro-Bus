@@ -231,11 +231,26 @@ function renderHeroSsr(
       })
     : null;
   const totalN = growth.reduce((t, g) => t + g.n, 0) || summary.totalObservations;
+  // Skeleton for the search box and quick-route pills: real markup doesn't
+  // exist until index.json loads and renderHome() runs client-side, so
+  // without this a visitor's first paint is the headline and then nothing --
+  // which reads as broken, not loading. app.js replaces #view wholesale on
+  // load, so this never lingers or gets out of sync with the real content;
+  // it only has to look right for the one round trip before that happens.
   return `
     <div class="hero">
       <h1>Is my bus late?</h1>
       <p class="lede">See how often Madison Metro actually runs on time.
       ${since ? `Collecting since ${esc(since)}, ${totalN.toLocaleString()} arrivals recorded so far.` : ""}</p>
+      <div class="omnisearch">
+        <input type="search" class="omniq" disabled autofocus
+               placeholder="Search by route number or stop name…" aria-label="Search by route number or stop name">
+      </div>
+      <div class="pill-row skel" aria-hidden="true">
+        <span class="pill-btn skel-pill"></span><span class="pill-btn skel-pill"></span>
+        <span class="pill-btn skel-pill"></span><span class="pill-btn skel-pill"></span>
+        <span class="pill-btn skel-pill"></span>
+      </div>
     </div>`;
 }
 

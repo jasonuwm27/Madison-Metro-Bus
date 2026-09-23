@@ -99,6 +99,49 @@ p{margin:0 0 12px}
 /* ---- recent stops: localStorage, no accounts -- learned, not configured */
 .recent{margin-top:32px}
 
+/* ---- omnisearch: the visual focal point of the landing screen ----------
+   Combined route + stop search, directly under the subtitle. Sized and
+   weighted well above every other control on the page (taller, larger
+   type, a visible focus ring) so it reads as THE thing to do, not one
+   option among equals. autofocus is set on both the real input and its
+   SSR skeleton twin so focus lands correctly regardless of which one the
+   browser sees first. */
+.omnisearch{margin:18px 0 12px}
+.omniq{
+  width:100%;min-height:58px;padding:16px 18px;font-size:17px;font-weight:500;
+  border:1.5px solid var(--line);border-radius:var(--radius);
+  background:var(--card);color:var(--ink);
+}
+.omniq:focus{outline:2px solid var(--ink);outline-offset:-1px;border-color:var(--ink)}
+.omniq::placeholder{color:var(--muted)}
+#omniResults{margin-top:8px}
+#omniResults:empty{margin-top:0}
+
+/* ---- quick-select route pills, under the search box --------------------
+   Tapping beats typing for someone who just wants "the 80" -- a handful of
+   the busiest routes, one tap straight to the route page. */
+.pill-row{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 18px}
+.pill-btn{
+  display:inline-flex;align-items:center;min-height:36px;padding:8px 14px;
+  border:1px solid var(--line);border-radius:999px;background:var(--card);
+  color:inherit;text-decoration:none;font-weight:600;font-size:13.5px;
+  font-variant-numeric:tabular-nums;
+}
+.pill-btn:active{border-color:var(--ink)}
+
+/* ---- skeleton loading state: first paint before index.json arrives -----
+   Shown only inside the SSR-baked hero (see export-site.ts renderHeroSsr);
+   app.js replaces the whole block on load, so this never has to be torn
+   down explicitly -- it just stops existing. */
+.skel-pill{width:64px;background:var(--raised);border-color:var(--raised);
+  animation:skel-pulse 1.4s ease-in-out infinite}
+.skel-pill:nth-child(2){animation-delay:.1s}
+.skel-pill:nth-child(3){animation-delay:.2s}
+.skel-pill:nth-child(4){animation-delay:.3s}
+.skel-pill:nth-child(5){animation-delay:.4s}
+@keyframes skel-pulse{0%,100%{opacity:.5}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.skel-pill{animation:none;opacity:.7}}
+
 .locate-btn{
   display:flex;align-items:center;justify-content:center;gap:10px;width:100%;
   min-height:60px;padding:14px 18px;border:0;border-radius:var(--radius);
@@ -342,6 +385,15 @@ footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);font-si
       <h1>Is my bus late?</h1>
       <p class="lede">See how often Madison Metro actually runs on time.
       Collecting since September 15, 2026, 240,113 arrivals recorded so far.</p>
+      <div class="omnisearch">
+        <input type="search" class="omniq" disabled autofocus
+               placeholder="Search by route number or stop name…" aria-label="Search by route number or stop name">
+      </div>
+      <div class="pill-row skel" aria-hidden="true">
+        <span class="pill-btn skel-pill"></span><span class="pill-btn skel-pill"></span>
+        <span class="pill-btn skel-pill"></span><span class="pill-btn skel-pill"></span>
+        <span class="pill-btn skel-pill"></span>
+      </div>
     </div><!-- SSR-END -->
   </main>
 
