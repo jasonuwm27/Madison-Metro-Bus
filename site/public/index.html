@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#0a0a0b">
 <title>Is my bus late? — Madison Metro reliability</title>
-<meta name="description" content="How often Madison Metro buses actually run late, by stop, route and time of day. Built from archived GTFS-realtime data.">
+<meta name="description" content="How often Madison Metro buses actually run late, by stop, route and time of day. Built from historical arrival data, not a live tracker.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚌</text></svg>">
 <style>
 /* ---------------------------------------------------------------------------
@@ -259,6 +259,19 @@ details.more>summary{
 details.more>summary::-webkit-details-marker{display:none}
 details.more>summary::before{content:"▸ ";display:inline-block;transition:transform .15s;color:var(--muted)}
 details.more[open]>summary::before{transform:rotate(90deg)}
+
+/* ---- "what counts as late" definition -- same disclosure pattern, but
+   lighter-weight styling (smaller, muted) since it's a glossary note, not
+   a primary content toggle like the ones above. */
+details.ontime-def{margin-top:14px}
+details.ontime-def>summary{
+  cursor:pointer;list-style:none;font-size:12.5px;font-weight:600;color:var(--muted);
+  padding:6px 0;user-select:none;
+}
+details.ontime-def>summary::-webkit-details-marker{display:none}
+details.ontime-def>summary::before{content:"▸ ";display:inline-block;transition:transform .15s}
+details.ontime-def[open]>summary::before{transform:rotate(90deg)}
+details.ontime-def p{margin:4px 0 0;font-size:12.5px;color:var(--muted);line-height:1.5}
 
 /* ---- Wilson interval as a RANGE BAR -----------------------------------
    A wide band must LOOK wide without reading any numbers. The track is the

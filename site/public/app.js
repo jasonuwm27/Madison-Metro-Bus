@@ -76,6 +76,25 @@ function insufficientDataHtml(kind) {
   return `<div class="card"><p class="muted">Not enough data for this ${kind} yet — check back after a few more days of collection.</p></div>`;
 }
 
+/**
+ * Plain-language "what does late mean" note, shown next to every on-time
+ * percentage on the site. Built from LATE_THRESHOLD_MIN rather than a
+ * hard-coded "5 minutes" -- the constant IS the definition, so the two can
+ * never drift out of sync the way a separately-written sentence could.
+ *
+ * A <details> disclosure, not a hover tooltip: hover doesn't exist on
+ * touch, and this site is built for someone reading it on a phone at a bus
+ * stop, same reasoning as every other progressive-disclosure control here
+ * ("See the numbers", "See all hours").
+ */
+function onTimeDefHtml() {
+  return `
+    <details class="ontime-def">
+      <summary>What counts as "late"?</summary>
+      <p>Late means the bus arrived ${LATE_THRESHOLD_MIN}+ minutes after its scheduled time. Anything closer than that counts as on time.</p>
+    </details>`;
+}
+
 /** Seconds → a phrase a student reads without decoding. */
 function delayPhrase(sec) {
   const m = sec / 60;
@@ -872,6 +891,7 @@ function cellCard(c, state) {
         </div>
 
         <div class="note">${esc(uncertaintyNote(n))}</div>
+        ${onTimeDefHtml()}
       </details>
     </div>`;
 }
@@ -995,7 +1015,7 @@ function rankRow(s, cls) {
         <span class="rn">${esc(s.name)}</span>
         <span class="rn-sub">${esc(pos)} · ${s.n.toLocaleString()} arrivals${flag}</span>
       </span>
-      <span class="rv ${cls}">${s.pctLate.toFixed(0)}%</span>
+      <span class="rv ${cls}">${s.pctLate.toFixed(0)}% late</span>
     </li>`;
 }
 
@@ -1038,11 +1058,14 @@ async function renderRoute(id) {
     const profile = dirEntry ? profileSvg(dirEntry.stops, dirEntry.headsign) : { html: "", bind: () => {} };
 
     const hourRows = data.hours.filter((h) => h.d === state.day).sort((a, b) => a.h - b.h);
+    // "% late" labeled inline on every bar, not just implied by a bare
+    // number -- someone landing straight on this grid (from a bookmark,
+    // say) never sees the headline sentence above that spells it out.
     const byHourBars = hourRows.length
       ? `<div class="hours">${hourRows.map((h) => `
           <div class="hr" style="cursor:default" aria-selected="false">
             ${h.h === 0 ? "12a" : h.h < 12 ? h.h + "a" : h.h === 12 ? "12p" : (h.h - 12) + "p"}
-            <span class="n">${h.pctLate.toFixed(0)}%</span>
+            <span class="n">${h.pctLate.toFixed(0)}% late</span>
           </div>`).join("")}</div>`
       : `<p class="small muted">No hourly breakdown yet for ${DAY_LABEL[state.day].toLowerCase()}.</p>`;
 
@@ -1075,7 +1098,9 @@ async function renderRoute(id) {
       </div>
 
       <h2 style="margin-top:24px">By time of day, ${esc(DAY_LABEL[state.day].toLowerCase())}</h2>
-      ${byHourBars}`;
+      ${byHourBars}
+
+      ${onTimeDefHtml()}`;
 
     view.querySelectorAll("[data-day]").forEach((b) =>
       b.addEventListener("click", () => { state.day = Number(b.dataset.day); paint(); }));
