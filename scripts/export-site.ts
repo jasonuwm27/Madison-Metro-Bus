@@ -403,11 +403,75 @@ async function main(): Promise<void> {
       knownGapReason: r.known_gap_reason,
     }));
 
-    // ---- route tier ----------------------------------------------------------
+    // Hoisted here (used by both the system snapshot below and the route
+    // tier further down) -- a lazy subquery reference, not an eager fetch,
+    // so declaring it early costs nothing.
     const feedForRoutes = sql`
       select id from gtfs_feed_versions where load_completed_at is not null order by loaded_at desc limit 1
     `;
 
+    // ---- system snapshot -----------------------------------------------------
+    // One day's system-wide on-time rate plus its worst routes, shown on the
+    // landing page below the search bar -- something to look at before
+    // anyone has typed or tapped anything.
+    //
+    // "Most recent day" is NOT simply max(service_date): 2026-09-22 sits at
+    // 49.2% coverage with no diagnosed cause (see day_coverage), and showing
+    // its numbers as "today's on-time rate" would present a collection gap
+    // as bad bus service -- exactly the failure mode day_coverage exists to
+    // prevent. The snapshot walks backward to the most recent day at or
+    // above 85% coverage (the same threshold scripts/rollup.ts alerts on),
+    // skipping both known-gap days and unexplained-but-undiagnosed ones
+    // alike. This self-heals: once 09-22 is investigated and either fixed
+    // or flagged, it becomes eligible again without a code change.
+    const [snapshotDateRow] = await sql<{ service_date: unknown }[]>`
+      select r.service_date
+      from rollup_daily r
+      join day_coverage dc on dc.service_date = r.service_date
+      where dc.coverage_pct >= 85 and dc.service_date < current_date
+      group by r.service_date
+      order by r.service_date desc
+      limit 1
+    `;
+    let systemSnapshot: {
+      date: string | null;
+      n: number;
+      pctLate: number;
+      worstRoutes: { id: string; name: string | null; n: number; pctLate: number }[];
+    } | null = null;
+    if (snapshotDateRow !== undefined) {
+      const snapshotDate = toDateOnly(snapshotDateRow.service_date);
+      const [overall] = await sql<{ n: string; n_late: string }[]>`
+        select sum(n)::text as n, sum(n_late_240)::text as n_late
+        from rollup_daily where service_date = ${snapshotDate}::date
+      `;
+      const worstRoutesRaw = await sql<{ route_id: string; route_name: string | null; n: string; n_late: string }[]>`
+        select rd.route_id, sr.route_long_name as route_name,
+               sum(rd.n)::text as n, sum(rd.n_late_240)::text as n_late
+        from rollup_daily rd
+        left join static_routes sr
+          on sr.route_id = rd.route_id and sr.feed_version_id = (${feedForRoutes})
+        where rd.service_date = ${snapshotDate}::date
+        group by rd.route_id, sr.route_long_name
+        having sum(rd.n) >= ${N_CONFIDENT}
+        order by (sum(rd.n_late_240)::numeric / nullif(sum(rd.n), 0)) desc
+        limit 5
+      `;
+      const totalN = Number(overall?.n ?? 0);
+      const totalLate = Number(overall?.n_late ?? 0);
+      systemSnapshot = {
+        date: snapshotDate,
+        n: totalN,
+        pctLate: totalN > 0 ? round((totalLate / totalN) * 100) : 0,
+        worstRoutes: worstRoutesRaw.map((r) => {
+          const n = Number(r.n);
+          const nLate = Number(r.n_late);
+          return { id: r.route_id, name: r.route_name, n, pctLate: round((nLate / n) * 100) };
+        }),
+      };
+    }
+
+    // ---- route tier ----------------------------------------------------------
     const routeMeta = await sql<RouteMeta[]>`
       with observed as (
         select route_id, sum(n)::int as n from stop_route_hour_stats group by route_id
@@ -743,6 +807,7 @@ async function main(): Promise<void> {
       thresholds: { confident: N_CONFIDENT, provisional: N_PROVISIONAL },
       growth: growthSeries,
       dayCoverage,
+      systemSnapshot,
       stops: stops.map((s) => ({
         id: s.stop_id,
         name: s.stop_name,
@@ -782,15 +847,20 @@ async function main(): Promise<void> {
     const htmlPath = join(dirname(outRoot), "index.html");
     try {
       const template = await readFile(htmlPath, "utf8");
-      const ssrBlock = renderHeroSsr(summary, growthSeries);
-      const rendered = template.replace(
-        /<!-- SSR-BEGIN -->[\s\S]*?<!-- SSR-END -->/,
-        `<!-- SSR-BEGIN -->${ssrBlock}<!-- SSR-END -->`,
-      );
-      if (rendered === template) {
+      const markerPattern = /<!-- SSR-BEGIN -->[\s\S]*?<!-- SSR-END -->/;
+      if (!markerPattern.test(template)) {
         log.warn({ htmlPath }, "SSR markers not found in index.html; left unmodified");
       } else {
-        await writeFile(htmlPath, rendered);
+        const ssrBlock = renderHeroSsr(summary, growthSeries);
+        const rendered = template.replace(
+          markerPattern,
+          `<!-- SSR-BEGIN -->${ssrBlock}<!-- SSR-END -->`,
+        );
+        // rendered === template is expected and fine when the hero content
+        // happens to be byte-identical to the last export (same date, same
+        // rounded arrival count) -- NOT a sign the markers went missing, so
+        // this no longer shares a code path with the warning above.
+        if (rendered !== template) await writeFile(htmlPath, rendered);
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

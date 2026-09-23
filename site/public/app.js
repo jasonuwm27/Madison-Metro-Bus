@@ -196,6 +196,48 @@ function trustLineHtml(d, growth) {
   return `<p class="trust-line">Built from ${compactCount(totalN)} arrivals · Collecting since ${esc(since)} · Updated nightly</p>`;
 }
 
+/**
+ * System snapshot: one day's system-wide on-time rate and its worst
+ * routes, shown on the landing page below the search bar -- something to
+ * look at before anyone has typed or tapped anything.
+ *
+ * date is NOT necessarily the most recent collected day -- export-site.ts
+ * walks backward past any day below 85% coverage (a collection gap, known
+ * or not-yet-diagnosed) so this never presents a bad-COLLECTION day as bad
+ * BUS service. The date is always shown explicitly for that reason: this
+ * is "this is what <date> looked like", not implicitly "today".
+ */
+function systemSnapshotHtml(snapshot) {
+  if (!snapshot || !snapshot.date || snapshot.n === 0) return "";
+  const dateLabel = new Date(snapshot.date + "T12:00:00Z").toLocaleDateString(undefined, {
+    weekday: "long", month: "short", day: "numeric",
+  });
+  const onTimePct = Math.max(0, 100 - snapshot.pctLate);
+  const worstRows = snapshot.worstRoutes.map((r) => `
+    <li>
+      <a class="snapshot-route-link" href="/route/${encodeURIComponent(r.id)}">
+        <span>
+          <span class="rn">Route ${esc(r.id)}</span>
+          <span class="rn-sub">${esc(r.name || "")}</span>
+        </span>
+        <span class="rv late">${r.pctLate.toFixed(0)}% late</span>
+      </a>
+    </li>`).join("");
+  return `
+    <section class="section" aria-label="System snapshot">
+      <h2>System snapshot</h2>
+      <p class="small muted" style="margin-top:-4px">${esc(dateLabel)}, the most recent day with reliable collection.</p>
+      <div class="card">
+        <p class="headline">System-wide on-time rate: <span class="hi ${onTimePct >= 75 ? "ontime" : "late"}">${onTimePct.toFixed(0)}%</span></p>
+        <p class="headline-sub">${snapshot.n.toLocaleString()} arrivals recorded that day</p>
+        ${snapshot.worstRoutes.length ? `
+          <p class="lbl" style="margin-top:14px">Worst-performing routes that day</p>
+          <ul class="rank-list snapshot-worst">${worstRows}</ul>` : ""}
+        ${onTimeDefHtml()}
+      </div>
+    </section>`;
+}
+
 function growthSectionHtml(d, growth) {
   const totalN = (growth || []).reduce((t, g) => t + g.n, 0) || d.totalObservations;
   return `
@@ -426,6 +468,8 @@ function renderHome() {
     </div>
 
     <div id="nearResults"></div>
+
+    ${systemSnapshotHtml(INDEX.systemSnapshot)}
 
     ${recentStopsHtml()}
 
