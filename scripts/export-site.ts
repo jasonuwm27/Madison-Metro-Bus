@@ -221,16 +221,37 @@ function esc(s: string): string {
  * (and any crawler, which never runs the client) real numbers instead of
  * "Loading…".
  */
+/**
+ * "215K+" style rounding for the trust-signal counter -- a precise
+ * "240,113" reads as a raw log-file number; a rounded-down "240K+" reads as
+ * a scale claim, which is what this line is for. Always rounds DOWN (floor,
+ * not round) so the displayed figure is never an overstatement of what has
+ * actually been collected.
+ */
+function compactCount(n: number): string {
+  if (n < 1000) return String(n);
+  return `${Math.floor(n / 1000)}K+`;
+}
+
 function renderHeroSsr(
   summary: { totalObservations: number; serviceDays: number; firstServiceDate: string | null },
   growth: readonly { date: string | null; n: number }[],
 ): string {
   const since = summary.firstServiceDate
     ? new Date(`${summary.firstServiceDate}T12:00:00Z`).toLocaleDateString("en-US", {
-        day: "numeric", month: "long", year: "numeric",
+        month: "short", day: "numeric", year: "numeric",
       })
     : null;
   const totalN = growth.reduce((t, g) => t + g.n, 0) || summary.totalObservations;
+  // Trust-signal line, not a raw counter: scale ("215K+ arrivals"), start
+  // date, and cadence in one skimmable row, rather than a sentence built
+  // around the exact number. "Updated nightly" -- not "hourly" or "live" --
+  // matches the real export/deploy cadence (bus-deploy.timer, 05:15 CT);
+  // this line exists specifically to set accurate expectations, so it must
+  // not itself overclaim freshness.
+  const trustLine = since
+    ? `Built from ${compactCount(totalN)} arrivals · Collecting since ${esc(since)} · Updated nightly`
+    : "";
   // Skeleton for the search box and quick-route pills: real markup doesn't
   // exist until index.json loads and renderHome() runs client-side, so
   // without this a visitor's first paint is the headline and then nothing --
@@ -239,9 +260,10 @@ function renderHeroSsr(
   // it only has to look right for the one round trip before that happens.
   return `
     <div class="hero">
+      <span class="disclaimer-pill">Not affiliated with the City of Madison</span>
       <h1>Is my bus late?</h1>
-      <p class="lede">See how often Madison Metro actually runs on time.
-      ${since ? `Collecting since ${esc(since)}, ${totalN.toLocaleString()} arrivals recorded so far.` : ""}</p>
+      <p class="lede">Historical on-time performance for every Madison Metro route and stop — not a live tracker.</p>
+      ${trustLine ? `<p class="trust-line">${trustLine}</p>` : ""}
       <div class="omnisearch">
         <input type="search" class="omniq" disabled autofocus
                placeholder="Search by route number or stop name…" aria-label="Search by route number or stop name">

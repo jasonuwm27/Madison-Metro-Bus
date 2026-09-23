@@ -60,6 +60,26 @@ p{margin:0 0 12px}
 .hero{padding-top:28px}
 .hero .lede{font-size:16px;color:var(--muted);margin:0 0 16px;max-width:46ch}
 
+/* ---- disclaimer pill: near the top, not buried in the footer ----------
+   "Not affiliated" is a legal/trust fact someone should see before they
+   start trusting the numbers, not after they've scrolled past everything
+   else -- a footer line nobody reads doesn't do its job. */
+.disclaimer-pill{
+  display:inline-block;margin:0 0 12px;padding:4px 10px;border-radius:999px;
+  border:1px solid var(--line);background:var(--raised);
+  font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.01em;
+}
+
+/* ---- trust-signal line: scale, start date, cadence -- not a raw counter
+   Framed as "what backs this" (215K+ arrivals, collecting since <date>,
+   updated nightly) rather than a bare "N arrivals recorded" sentence, and
+   states the real once-nightly cadence explicitly so nobody mistakes this
+   for a live tracker the way the bare title alone might suggest. */
+.trust-line{
+  font-size:12.5px;color:var(--muted);margin:0 0 16px;
+  font-variant-numeric:tabular-nums;
+}
+
 /* ---- live pulse: the one live element on an otherwise static site ------
    A thin animated waveform, not a stat card -- the point is to read as "this
    is running right now" at a glance, not to be parsed. --i staggers each
@@ -382,9 +402,10 @@ footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);font-si
   <main id="view">
     <!-- SSR-BEGIN -->
     <div class="hero">
+      <span class="disclaimer-pill">Not affiliated with the City of Madison</span>
       <h1>Is my bus late?</h1>
-      <p class="lede">See how often Madison Metro actually runs on time.
-      Collecting since September 15, 2026, 240,113 arrivals recorded so far.</p>
+      <p class="lede">Historical on-time performance for every Madison Metro route and stop — not a live tracker.</p>
+      <p class="trust-line">Built from 240K+ arrivals · Collecting since Sep 15, 2026 · Updated nightly</p>
       <div class="omnisearch">
         <input type="search" class="omniq" disabled autofocus
                placeholder="Search by route number or stop name…" aria-label="Search by route number or stop name">
@@ -399,8 +420,7 @@ footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);font-si
 
   <footer>
     <p id="generated" class="tiny"></p>
-    <p class="tiny"><a href="https://github.com/jasonuwm27/Madison-Metro-Bus">Source on GitHub</a> ·
-    Not affiliated with the City of Madison.</p>
+    <p class="tiny"><a href="https://github.com/jasonuwm27/Madison-Metro-Bus">Source on GitHub</a></p>
   </footer>
 </div>
 <script src="/app.js" type="module"></script>

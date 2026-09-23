@@ -37,6 +37,18 @@ const esc = (s) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
   );
 
+/**
+ * "215K+" style rounding for the trust-signal line -- mirrors
+ * scripts/export-site.ts's compactCount exactly, since the SSR skeleton and
+ * this client render must show the same number in the same format or the
+ * page visibly changes shape the instant index.json loads. Always floors,
+ * never rounds up, so the figure shown is never an overstatement.
+ */
+function compactCount(n) {
+  if (n < 1000) return String(n);
+  return `${Math.floor(n / 1000)}K+`;
+}
+
 /** Seconds → a phrase a student reads without decoding. */
 function delayPhrase(sec) {
   const m = sec / 60;
@@ -117,6 +129,23 @@ function growthChartSvg(series) {
       <text x="${padL}" y="${H - 6}" font-size="11" fill="var(--muted)">${esc(firstLabel)}</text>
       <text x="${W - padR}" y="${H - 6}" font-size="11" fill="var(--muted)" text-anchor="end">${esc(lastLabel)}</text>
     </svg>`;
+}
+
+/**
+ * Trust-signal line under the subtitle: scale, start date, cadence -- in
+ * place of a raw "240,113 arrivals recorded" counter, which reads as a
+ * log-file number rather than a claim about how much data backs the site.
+ * "Updated nightly" is the real cadence (bus-deploy.timer, 05:15 CT); this
+ * line exists specifically to set accurate expectations, so it must never
+ * itself overclaim freshness the way the old title implied.
+ */
+function trustLineHtml(d, growth) {
+  if (!d.firstServiceDate) return "";
+  const totalN = (growth || []).reduce((t, g) => t + g.n, 0) || d.totalObservations;
+  const since = new Date(d.firstServiceDate + "T12:00:00Z").toLocaleDateString(undefined, {
+    month: "short", day: "numeric", year: "numeric",
+  });
+  return `<p class="trust-line">Built from ${compactCount(totalN)} arrivals · Collecting since ${esc(since)} · Updated nightly</p>`;
 }
 
 function growthSectionHtml(d, growth) {
@@ -329,8 +358,10 @@ function renderHome() {
   // pop the keyboard without a user gesture anyway.
   view.innerHTML = `
     <div class="hero">
+      <span class="disclaimer-pill">Not affiliated with the City of Madison</span>
       <h1>Is my bus late?</h1>
-      <p class="lede">See how often Madison Metro actually runs on time.</p>
+      <p class="lede">Historical on-time performance for every Madison Metro route and stop — not a live tracker.</p>
+      ${trustLineHtml(INDEX.dataset, INDEX.growth)}
       ${pulseHtml()}
 
       <div class="omnisearch">
