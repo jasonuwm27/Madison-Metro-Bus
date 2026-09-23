@@ -41,7 +41,7 @@ const server = createServer(async (req, res) => {
   // address bar keeps the real URL. Data and assets are matched first so the
   // catch-all cannot swallow them.
   if (urlPath === "/") urlPath = "/index.html";
-  else if (urlPath.startsWith("/stop/") || urlPath.startsWith("/route/")) urlPath = "/index.html";
+  else if (urlPath.startsWith("/stop/") || urlPath.startsWith("/route/") || urlPath === "/about") urlPath = "/index.html";
 
   // Contain path traversal: normalise, then verify the result is still inside
   // ROOT before touching the filesystem.

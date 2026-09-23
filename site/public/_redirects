@@ -9,3 +9,4 @@
 /app.js    /app.js        200
 /stop/*    /index.html    200
 /route/*   /index.html    200
+/about     /index.html    200

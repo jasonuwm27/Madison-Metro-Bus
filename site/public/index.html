@@ -46,6 +46,28 @@ body{
   padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
   overflow-wrap:break-word;
 }
+/* ---- sticky nav: minimal persistent chrome, not a second hero ---------
+   Deliberately slim and low-contrast (border, not shadow; small type) so
+   it reads as navigation, not competing content -- the home page's own
+   <h1> is still the real headline. env(safe-area-inset-top) keeps it clear
+   of a notch when the page is also opened as a PWA/home-screen shortcut. */
+.sitenav{
+  position:sticky;top:0;z-index:10;background:var(--bg);
+  border-bottom:1px solid var(--line);
+  padding-top:env(safe-area-inset-top);
+}
+.sitenav-inner{
+  max-width:720px;margin:0 auto;padding:0 var(--pad);
+  min-height:48px;display:flex;align-items:center;justify-content:space-between;gap:12px;
+}
+.sitenav-title{
+  color:var(--ink);text-decoration:none;font-weight:700;font-size:14.5px;
+  letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.sitenav-link{color:var(--muted);text-decoration:none;font-size:12.5px;font-weight:600;
+  white-space:nowrap}
+.sitenav-link:active,.sitenav-title:active{opacity:.7}
+
 .wrap{max-width:720px;margin:0 auto;padding:0 var(--pad) 64px}
 h1{font-size:clamp(23px,6vw,32px);line-height:1.15;margin:0 0 6px;letter-spacing:-.03em;font-weight:700}
 h2{font-size:clamp(14px,3.5vw,15px);margin:0 0 10px;letter-spacing:-.005em;font-weight:600;
@@ -434,6 +456,18 @@ footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);font-si
 </style>
 </head>
 <body>
+<!-- Sticky nav: minimal by design -- the home page's own <h1> is the real
+     headline, this bar is just persistent chrome so someone three levels
+     deep (a route page, reached from a stop page, reached from search)
+     always has a one-tap way back, without needing app.js to have loaded
+     or rendered anything yet. Lives outside .wrap so it can span full
+     width while its content stays reading-width. -->
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a href="/" class="sitenav-title">Is my bus late?</a>
+    <a href="/about" class="sitenav-link">How this works</a>
+  </div>
+</nav>
 <div class="wrap">
   <main id="view">
     <!-- SSR-BEGIN -->
@@ -456,7 +490,7 @@ footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);font-si
 
   <footer>
     <p id="generated" class="tiny"></p>
-    <p class="tiny"><a href="https://github.com/jasonuwm27/Madison-Metro-Bus">Source on GitHub</a></p>
+    <p class="tiny"><a href="https://github.com/jasonuwm27/Madison-Metro-Bus" class="muted">Source on GitHub</a></p>
   </footer>
 </div>
 <script src="/app.js" type="module"></script>

@@ -1155,6 +1155,61 @@ async function renderRoute(id) {
   paint();
 }
 
+/* ------------------------------------------------------------------ about */
+
+/**
+ * "How this works" -- data source, collection method, update frequency, in
+ * plain language. No jargon like "GTFS-realtime" here or anywhere else in
+ * the UI (it stays in code comments and the README); this page exists
+ * specifically so someone can understand what they're looking at without
+ * knowing transit-data terminology.
+ */
+function renderAbout() {
+  if (pulseCleanup) { pulseCleanup(); pulseCleanup = null; }
+  const d = INDEX.dataset;
+  const since = d.firstServiceDate
+    ? new Date(d.firstServiceDate + "T12:00:00Z").toLocaleDateString(undefined, {
+        month: "long", day: "numeric", year: "numeric",
+      })
+    : null;
+  view.innerHTML = `
+    <p><a href="/" class="small">← Back</a></p>
+    <h2 style="margin-top:10px">How this works</h2>
+
+    <div class="card">
+      <h3>Where the data comes from</h3>
+      <p>Madison Metro publishes a live feed of where its buses actually are and when they're
+      actually expected to arrive at each stop. This site checks that feed every 30 seconds,
+      around the clock, and keeps a permanent record of what it saw.</p>
+    </div>
+
+    <div class="card">
+      <h3>How "late" is measured</h3>
+      <p>Every scheduled arrival time comes from Metro's published timetable. Every actual
+      arrival time comes from that live feed. The difference between the two is the delay --
+      compared against the ${LATE_THRESHOLD_MIN}-minute threshold used everywhere on this site
+      to call an arrival "late".</p>
+    </div>
+
+    <div class="card">
+      <h3>How often this updates</h3>
+      <p>Collection runs continuously, but the numbers on this site are rebuilt and published
+      once every night. So this is never a live tracker of where a bus is right now --
+      it's a historical record of how a route or stop has actually performed, built from
+      real arrivals rather than the schedule alone.</p>
+    </div>
+
+    ${d.firstServiceDate ? `
+    <div class="card">
+      <h3>How much history exists</h3>
+      <p>Collection began on ${esc(since)}. Nobody published this data before that date, and
+      nobody else keeps an ongoing archive of it -- once a day passes, Metro's live feed moves
+      on and that day's predictions are gone unless something recorded them first.</p>
+    </div>` : ""}
+
+    ${dataCompletenessHtml(INDEX.dayCoverage)}`;
+}
+
 /* ----------------------------------------------------------------- router */
 
 function route() {
@@ -1162,6 +1217,7 @@ function route() {
   const routeMatch = location.pathname.match(/^\/route\/([^/]+)/);
   if (stopMatch) renderStop(decodeURIComponent(stopMatch[1]));
   else if (routeMatch) renderRoute(decodeURIComponent(routeMatch[1]));
+  else if (location.pathname === "/about") renderAbout();
   else renderHome();
 }
 
