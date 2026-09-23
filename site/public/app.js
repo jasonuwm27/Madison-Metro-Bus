@@ -49,6 +49,33 @@ function compactCount(n) {
   return `${Math.floor(n / 1000)}K+`;
 }
 
+/**
+ * The one error banner shared by every fetch failure that leaves a page
+ * with nothing else to show (the index.json bootstrap, a stop fetch, a
+ * route fetch). One wording everywhere means a visitor who sees this twice
+ * recognises it as "the site's standard failure state", not a different
+ * broken thing each time. Distinct from the "not enough data" empty states
+ * below -- this is for when the FETCH itself failed, not when it succeeded
+ * and simply found too little to show.
+ */
+function errorBannerHtml(backHref) {
+  return `
+    <div class="error-banner" role="alert">
+      <p>Having trouble loading data. Try refreshing, or check back in a few minutes.</p>
+      ${backHref ? `<p><a href="${esc(backHref)}" class="small">← Back</a></p>` : ""}
+    </div>`;
+}
+
+/**
+ * "This exists but there isn't enough collected yet" -- distinct from a
+ * fetch failure. Shared wording (and shared threshold framing: "a few more
+ * days") across stop and route pages so the two never phrase the same
+ * concept two different ways.
+ */
+function insufficientDataHtml(kind) {
+  return `<div class="card"><p class="muted">Not enough data for this ${kind} yet — check back after a few more days of collection.</p></div>`;
+}
+
 /** Seconds → a phrase a student reads without decoding. */
 function delayPhrase(sec) {
   const m = sec / 60;
@@ -111,7 +138,9 @@ function rangeBar({ lo, hi, point, min, max, fmt }) {
  */
 function growthChartSvg(series) {
   const W = 640, H = 160, padL = 4, padR = 4, padT = 10, padB = 22;
-  if (series.length === 0) return "";
+  // Never return an empty string here -- an empty SVG area under a caption
+  // reads as a broken chart, not as "no data yet". Say so instead.
+  if (series.length === 0) return `<p class="small muted">Not enough data yet to chart growth.</p>`;
   const max = Math.max(...series.map((d) => d.n), 1);
   const innerW = W - padL - padR, innerH = H - padT - padB;
   const x = (i) => padL + (series.length === 1 ? innerW / 2 : (i / (series.length - 1)) * innerW);
@@ -650,10 +679,24 @@ async function renderStop(id) {
     if (!r.ok) throw new Error(String(r.status));
     data = await r.json();
   } catch {
-    view.innerHTML = `<p>Couldn't load that stop. <a href="/">Back to search</a></p>`;
+    view.innerHTML = errorBannerHtml("/");
     return;
   }
   recordRecentStop(id);
+
+  // A stop that exists in the export but hasn't collected enough arrivals
+  // yet -- distinct from a fetch failure above. Checked BEFORE building
+  // route/day state off data.routes/data.cells, which can legitimately be
+  // empty here; without this check that state construction (routes[0],
+  // etc.) would proceed against empty arrays and the page below would
+  // render broken rather than explain why there's nothing to show.
+  if (!data.hasUsableData) {
+    view.innerHTML = `
+      <p><a href="/" class="small">← All stops</a></p>
+      <h2 style="margin-top:6px">${esc(data.stop.name)}</h2>
+      ${insufficientDataHtml("stop")}`;
+    return;
+  }
 
   // Only offer day types that actually exist in the data. A Saturday tab that
   // can only ever say "no data" is worse than no tab.
@@ -965,7 +1008,7 @@ async function renderRoute(id) {
     if (!r.ok) throw new Error(String(r.status));
     data = await r.json();
   } catch {
-    view.innerHTML = `<p>Couldn't load that route. <a href="/">Back to search</a></p>`;
+    view.innerHTML = errorBannerHtml("/");
     return;
   }
 
@@ -974,7 +1017,7 @@ async function renderRoute(id) {
       <p><a href="/" class="small">← All routes</a></p>
       <h2 style="margin-top:6px">Route ${esc(data.route.id)}</h2>
       <p class="muted">${esc(data.route.name || "")}</p>
-      <div class="card"><p class="muted">Not enough arrivals recorded for this route yet. Most routes need about two weeks of collection.</p></div>`;
+      ${insufficientDataHtml("route")}`;
     return;
   }
 
@@ -1071,9 +1114,15 @@ window.addEventListener("popstate", route);
 (async function start() {
   try {
     const r = await fetch("/data/index.json");
+    if (!r.ok) throw new Error(String(r.status));
     INDEX = await r.json();
     route();
   } catch {
-    view.innerHTML = `<p>Couldn't load the data. Please refresh.</p>`;
+    // The one failure that can leave the ENTIRE app with nothing to render --
+    // every other page (stop, route) at least has INDEX already loaded by
+    // this point. A visible banner with a concrete next step, not a bare
+    // sentence, since this is the "is the site actually broken" moment for
+    // a visitor with no other page to fall back to.
+    view.innerHTML = errorBannerHtml();
   }
 })();

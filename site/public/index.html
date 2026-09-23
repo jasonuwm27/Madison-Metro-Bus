@@ -216,6 +216,17 @@ input[type=search]:focus{outline:2px solid var(--ink);outline-offset:-1px}
 }
 .card h3{margin:0 0 2px;font-size:15.5px;font-weight:600;color:var(--muted)}
 
+/* ---- error banner: a fetch genuinely failed, not just "no data" --------
+   Visually distinct from .card (which is used for the softer "not enough
+   data yet" empty states) -- a warm border says "something is actually
+   wrong", not just "nothing to show". */
+.error-banner{
+  background:var(--card);border:1px solid var(--late);border-radius:var(--radius);
+  padding:16px;margin:0 0 12px;
+}
+.error-banner p{margin:0 0 8px}
+.error-banner p:last-child{margin-bottom:0}
+
 /* ---- the headline sentence: the answer, before any chart or number ---- */
 .headline{font-size:clamp(19px,5vw,23px);font-weight:700;line-height:1.3;margin:4px 0 4px;letter-spacing:-.01em}
 .headline .hi.late{color:var(--late)} .headline .hi.ontime{color:var(--ontime)} .headline .hi.early{color:var(--early)}
