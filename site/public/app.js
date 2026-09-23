@@ -1217,7 +1217,13 @@ function route() {
   const routeMatch = location.pathname.match(/^\/route\/([^/]+)/);
   if (stopMatch) renderStop(decodeURIComponent(stopMatch[1]));
   else if (routeMatch) renderRoute(decodeURIComponent(routeMatch[1]));
-  else if (location.pathname === "/about") renderAbout();
+  // Trailing slash matters: Cloudflare Pages 308-redirects the bare /about
+  // to / before _redirects is even evaluated (a platform quirk with
+  // extensionless single-segment paths -- /about/ is unaffected). Matching
+  // both here costs nothing and means a visitor who types the bare form
+  // still lands on the right view rather than silently seeing the redirect
+  // take them home.
+  else if (location.pathname === "/about" || location.pathname === "/about/") renderAbout();
   else renderHome();
 }
 
