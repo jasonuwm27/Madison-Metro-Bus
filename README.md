@@ -1,21 +1,59 @@
 # Madison Metro reliability tracker
 
-Archives Madison Metro's GTFS-RT feeds to build historical on-time performance
-data for UW–Madison riders.
+**Live at [madison-bus.pages.dev](https://madison-bus.pages.dev).**
 
-The eventual question this answers: *"Route 80 at Union South, 8:50am — how
-often is it actually late?"* Nobody publishes that, and nobody archives the
-feeds it would come from. This collects them.
+Answers a question nobody publishes: *"Route 80 at Union South, 8:50am — how
+often is it actually late?"* Madison Metro's realtime feeds show what's
+happening this minute and nothing about last Tuesday, and nobody archives
+them. This does: a collector has been polling Metro's GTFS-RT feeds every 30
+seconds since September 2026, turning a feed with no history into a growing
+one, and a static site built from that data answers the question above for
+every stop and route in the system.
 
-**Status: phase 1 (ingestion) complete.** No frontend or analysis API yet.
+## What it does
 
-## Why it has to run now
+- **Collects continuously.** A Node worker polls Madison Metro's TripUpdates,
+  VehiclePositions, and Alerts feeds around the clock, archives the raw bytes,
+  decodes TripUpdates, and joins it against the static GTFS schedule to
+  compute how late each bus actually ran.
+- **Never loses a poll.** Every write is idempotent and convergent — a
+  restart, a retry, or a replay of an archived shard all land on the same
+  final row, so the pipeline degrades instead of corrupting on failure.
+- **Serves it as a static site.** A nightly export turns the accumulated
+  Postgres data into flat JSON, deployed to Cloudflare Pages — no live
+  backend for the site itself, so it stays up even if the collector doesn't.
 
-Madison Metro publishes realtime data but keeps no history. The feeds show what
-is happening this minute and nothing about last Tuesday. Every day the collector
-is not running is a day of history that cannot be reconstructed from any source,
-at any price. That is the reason the ingestion worker was built before anything
-anyone can look at.
+## Why this was hard
+
+The interesting engineering here isn't the UI — it's what it took to turn an
+unreliable, undocumented realtime feed into data worth trusting. A few
+examples (full writeups in [CLAUDE.md](CLAUDE.md)):
+
+- **The feed has no `delay` field and no service date.** Only absolute
+  timestamps, so lateness has to be computed by joining the static schedule,
+  and the service day itself has to be *inferred* — by finding the calendar
+  date whose scheduled time is nearest the observed one, which is what makes
+  after-midnight trips (a bus scheduled "24:30:00") resolve correctly instead
+  of silently breaking at midnight.
+- **Detoured trips are published twice** — once as a planned reroute with no
+  vehicle attached, once as a live vehicle update — and they disagree with
+  each other by about a second. Naive dedup drops the wrong one; a precedence
+  rule in the transform decides which copy is authoritative.
+- **Predictions churn hard**: two polls 90 seconds apart shared ~5,000
+  (trip, stop) pairs, and 27% of them had already changed. The schema stores
+  one *collapsed* row per stop visit instead of appending every poll — which
+  cuts ~2M rows/day down to the couple hundred thousand that actually
+  matter — while still keeping churn stats (`change_count`,
+  `min`/`max_predicted_arrival`) instead of throwing that signal away.
+- **Two production incidents cost a day of raw archive** before the
+  root causes (an append-mode file bug, and a shutdown routine that only woke
+  one of three concurrent pollers) were found and fixed — both are now
+  regression tests, not just fixes. See "Two bugs that destroyed the first
+  day of archive" in CLAUDE.md.
+- **The archive is the real database; Postgres is a cache.** Raw bytes are
+  written before anything is decoded, so a decoding bug or schema mistake is
+  a replay away, not a permanent hole — which is also what makes it safe to
+  evict old Postgres partitions on a schedule instead of growing forever.
 
 ## Architecture
 
@@ -24,7 +62,7 @@ anyone can look at.
                                                  │                  │
                                                  ▼                  ▼
                                            decode (pure)     hourly .ndjson.gz
-                                                 │            local disk / R2
+                                                 │             local disk + Drive
                                                  ▼
                     ScheduleCache ────────► transform (pure)
                      (static GTFS)                │
@@ -33,169 +71,107 @@ anyone can look at.
                                                  │
                                                  ▼
                                     stop_time_observations
-                                     weekly partitions, 45d
+                                     (weekly partitions, 400d local)
                                                  │
                                                  ▼
-                                  rollup_daily 90d ──► rollup_monthly ∞
+                                  rollup_daily ──► rollup_monthly
+                                                 │
+                                                 ▼
+                                nightly export ──► static JSON ──► Cloudflare Pages
 ```
 
-Three feeds are polled: **TripUpdates** and **VehiclePositions** every 30s,
-**Alerts** every 5 minutes. All three are archived raw. Only TripUpdates is
-decoded and written to Postgres in phase 1 — but all three are archived now,
-because none of them is backfillable and "add it later" means permanently
-missing the days in between.
+Three feeds are polled — TripUpdates and VehiclePositions every 30s, Alerts
+every 5 minutes — and all three are archived raw, because none of them is
+backfillable: "decode it later" would mean permanently missing every day in
+between. Only TripUpdates is decoded into Postgres today.
 
-**The archive is the record of record; Postgres is a cache.** Raw bytes are
-written before decoding, so a decoder bug or a schema change is a replay rather
-than a permanent hole — and that is what makes evicting old partitions safe.
+The pure transform logic (`src/gtfsrt/decode.ts`, `src/gtfsrt/transform.ts`,
+`src/util/time.ts`) is synchronous, has no network or database access, and is
+the entire tested surface — 93 tests run against checked-in protobuf fixtures,
+no network or DB in CI.
 
-One row in `stop_time_observations` is one
-`(service_date, trip_id, stop_sequence, is_modified)`, upserted on every poll.
-Metro re-reports every upcoming stop of every active trip continuously — 6,035
-stop updates per poll, 27% of them changed 90 seconds later — so the row is
-collapsed rather than appended. `observed_arrival` holds the newest prediction;
-when the bus passes, the stop drops out of the feed and the last value stands.
-That last value is the arrival.
+## Stack
 
-The primary key doubles as the idempotency key, so re-polling, restarting
-mid-poll, and replaying an archive shard all converge on the same row.
+- **Collector**: Node 22 (TypeScript, strict), `postgres` for SQL, `pino` for
+  structured logs, `zod` for env validation. Runs as a systemd service on a
+  small ARM VM (Oracle Cloud free tier), not serverless — sub-minute polling
+  needs an always-on process.
+- **Database**: self-hosted Postgres 17 on the same VM. Started on Supabase,
+  fully migrated off it once local storage proved cheaper and higher-ceiling
+  (see "Cutover" in CLAUDE.md) — a five-day parallel run comparing both
+  databases row-for-row was the acceptance test before cutting over.
+- **Site**: no framework — a Node export script queries Postgres and writes
+  static JSON plus server-rendered HTML for the landing page; the client is
+  vanilla JS with its own tiny client-side router. Deployed to Cloudflare
+  Pages, which — unlike GitHub Pages — properly rewrites deep links like
+  `/stop/1234` to the app shell.
+- **Backups**: the raw archive is mirrored nightly to Google Drive via
+  `rclone`, verified by MD5 (not size or existence — a same-size corrupt file
+  is still corrupt), with a disaster-recovery restore actually tested end to
+  end.
+- **Monitoring**: healthchecks.io pings from every scheduled job (worker
+  liveness, rollup, backup, partition maintenance), so a silent failure
+  becomes an alert instead of a gap discovered weeks later.
 
-The feed carries **no `delay` field and no `trip.start_date`**, so lateness comes
-from joining the static schedule, and the service day is inferred by matching
-observed times against it. Both are documented in detail in
-[CLAUDE.md](CLAUDE.md).
+## Repo layout
 
-## Current status
-
-Update this section with real numbers as they come in.
-
-| Metric | Value | As of |
-|---|---|---|
-| Collecting since | _not yet started_ | — |
-| Observations stored | — | — |
-| Service days covered | — | — |
-| Archive shards / size | — | — |
-| Worker uptime (7d) | — | — |
-| Static feed version | `S072_202608240858` (expires 2026-12-05) | 2026-09-15 |
-
-Queries for these numbers:
-
-```sql
--- Observations, and the span they cover.
-select count(*) as observations,
-       min(service_date) as first_day,
-       max(service_date) as last_day,
-       count(distinct service_date) as days
-from stop_time_observations;
-
--- Poll health over the last day, per feed.
-select feed,
-       count(*) as polls,
-       count(*) filter (where not ok) as failures,
-       round(avg(duration_ms)) as avg_ms,
-       round(avg(feed_age_s)) as avg_feed_age_s,
-       sum(rows_written) as rows_written
-from ingest_runs
-where started_at > now() - interval '1 day'
-group by feed;
-
--- Sanity check: how much of the data actually has a usable schedule match?
-select scheduled_source, count(*)
-from stop_time_observations
-group by scheduled_source;
+```
+src/gtfsrt/       decode + transform — pure, synchronous, fully tested
+src/db/           all SQL lives here
+src/worker.ts     wires everything together, owns the poll loops
+src/util/time.ts  service-date inference — the fragile part, read CLAUDE.md first
+scripts/          rollup, partition maintenance, backups, site export, one-off ops tools
+site/             the static site (public/) and its local dev server
+test/             93 tests against checked-in GTFS-RT fixtures — no network, no DB
+sql/              schema, with the reasoning for each decision inline
 ```
 
-## Setup
+## Running it locally
 
 Requires Node 20+ and pnpm.
 
 ```bash
 pnpm install
-cp .env.example .env     # then set DATABASE_URL
+cp .env.example .env     # set DATABASE_URL
+
+pnpm load-static          # one-time: downloads Metro's schedule zip, ~603k rows
+pnpm worker                # starts collecting
 ```
 
-Load the static schedule first — without it observations are still collected,
-but they record no delay until it exists:
+Migrations run automatically at worker startup and are idempotent, so a fresh
+database needs no separate setup step.
 
 ```bash
-pnpm load-static          # downloads the zip, ~603k stop_times, one-time
-pnpm worker               # starts collecting
-```
-
-Migrations run automatically at worker startup; every statement is idempotent,
-so a fresh database needs no separate setup step.
-
-Maintenance, once collection is running:
-
-```bash
-pnpm rollup                      # daily rollup for yesterday — run daily
-pnpm rollup --monthly            # rebuild the current month
-pnpm partitions                  # create upcoming partitions — safe any time
-pnpm partitions --drop           # evict past 45 days (refuses if not rolled up)
-```
-
-Other commands:
-
-```bash
-pnpm test        # 60 tests, all against checked-in fixtures — no network, no DB
+pnpm test         # 93 tests, no network or DB required
 pnpm typecheck
 ```
 
-## Deployment
+Maintenance, once a worker has been collecting for a while:
 
-The worker is a single long-running Node process. It needs to be always-on with
-sub-minute polling, which rules out serverless — Vercel Hobby cron runs once a
-day, and 30-second polling means 2,880 invocations per feed per day regardless.
+```bash
+pnpm rollup                # daily rollup for yesterday
+pnpm partitions             # create upcoming partitions
+pnpm partitions --drop      # evict old partitions (refuses if not rolled up)
+```
 
-**Recommendation: a small VPS, paid for with student credits.**
+To run the site locally against a snapshot of real data:
 
-| Option | Cost | Trade-off |
-|---|---|---|
-| **Heroku Eco dyno via GitHub Student Pack** | **$13/mo credit for 24 months — effectively free** | Best value if you are eligible. The Student Pack credit covers a $5–7/mo dyno for two years. Eco dynos sleep on inactivity, so use Basic; no SSH, and the filesystem is ephemeral, so **archive to R2, not local disk** |
-| **Hetzner CX22** | ~$5/mo | 2 vCPU, 4 GB, 40 GB disk. Best raw value. Local disk holds ~18 months of archive, and you could move Postgres onto the same box later if Supabase's ceiling becomes a problem. You own updates and backups |
-| **Fly.io** | ~$2–5/mo | Smallest machine is cheap and it restarts on crash. Pure pay-as-you-go with no base fee. Billing is per-second and can surprise you |
-| **Render background worker** | $7/mo | Simplest deploy story. Their free tier does not cover workers, only web services, and those sleep |
-| **Azure via Student Pack** | $100 credit | Worth it only if you already know Azure; the credit expires and the VM sizing is fiddly |
-
-**Start with Heroku if you qualify for the Student Pack** — two years of free
-hosting is hard to argue with, and the ephemeral filesystem is a non-issue once
-`ARCHIVE_SINK=r2` is set. Otherwise Hetzner, which is the best value per dollar
-and leaves the most room to grow.
-
-Whatever you pick, set `HEALTHCHECK_URL`. A free healthchecks.io check with a
-20-minute alert threshold is the difference between losing an evening of data
-and losing a fortnight — and because Supabase pauses a free project after 7 days
-of database inactivity, an unnoticed worker death compounds into a paused
-project on top of the outage.
-
-Run under a supervisor that restarts on exit (systemd, or the platform's own).
-The worker is built never to exit on feed or database failures, but a restart
-policy costs nothing and covers the cases nobody predicted.
-
-### Storage budget
-
-At ~4.4M rows/month and ~970 MB/month with indexes, Supabase's 500 MB free tier
-holds roughly two weeks of raw observations — which is why partitions are
-evicted at 45 days and why the archive exists. The rollups are permanent and
-small. The archive runs **~5 GB/month** gzipped (measured, not estimated: a real
-131,904-byte TripUpdates payload compresses to 54,307 bytes as base64 NDJSON).
-That fills Cloudflare R2's 10 GB free tier in about two months, after which R2
-charges $0.015/GB/month — roughly $0.90/month once a year of history has
-accumulated. Setting `ARCHIVE_COMPRESSION=brotli` cuts it to ~3.7 GB/month with
-no change to the format.
-
-If you want full raw history hot in Postgres, self-hosting on the VPS is the
-cheaper answer than Supabase Pro: 40 GB of Hetzner disk is ~3.5 years of raw
-observations for the price you are already paying for the worker.
+```bash
+node scripts/pull-site-data.mjs   # pulls a fresh export from the VM
+pnpm site                          # serves site/public at localhost:8788
+```
 
 ## Documentation
 
-- [CLAUDE.md](CLAUDE.md) — architecture decisions, feed quirks, schema
-  rationale, and the reasoning behind the indexing and partitioning choices.
-- `sql/` — schema, with the reasoning inline.
+- [CLAUDE.md](CLAUDE.md) — the detailed engineering log: every schema
+  decision and why, the production incidents and their fixes, the Supabase
+  → self-hosted cutover, backup verification, and the reasoning behind each
+  indexing and partitioning choice. Written for whoever touches this code
+  next, including future me.
+- `sql/` — schema, with reasoning inline.
 
 ## Data source
 
 Madison Metro Transit GTFS and GTFS-RT feeds, used under Metro's Developer
-License Agreement and Terms of Use. The feeds are open and require no API key.
-This project is not affiliated with the City of Madison.
+License Agreement and Terms of Use. The feeds are open and require no API
+key. This project is not affiliated with the City of Madison.
