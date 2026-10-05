@@ -236,6 +236,7 @@ function compactCount(n: number): string {
 function renderHeroSsr(
   summary: { totalObservations: number; serviceDays: number; firstServiceDate: string | null },
   growth: readonly { date: string | null; n: number }[],
+  pausedOn: string | null,
 ): string {
   const since = summary.firstServiceDate
     ? new Date(`${summary.firstServiceDate}T12:00:00Z`).toLocaleDateString("en-US", {
@@ -249,9 +250,16 @@ function renderHeroSsr(
   // matches the real export/deploy cadence (bus-deploy.timer, 05:15 CT);
   // this line exists specifically to set accurate expectations, so it must
   // not itself overclaim freshness.
-  const trustLine = since
-    ? `Built from ${compactCount(totalN)} arrivals · Collecting since ${esc(since)} · Updated nightly`
-    : "";
+  const paused = pausedOn
+    ? new Date(`${pausedOn}T12:00:00Z`).toLocaleDateString("en-US", {
+        month: "short", day: "numeric", year: "numeric",
+      })
+    : null;
+  const trustLine = !since
+    ? ""
+    : paused
+      ? `Built from ${compactCount(totalN)} arrivals · Collected ${esc(since)} – ${esc(paused)} · Collection paused`
+      : `Built from ${compactCount(totalN)} arrivals · Collecting since ${esc(since)} · Updated nightly`;
   // Skeleton for the search box and quick-route pills: real markup doesn't
   // exist until index.json loads and renderHome() runs client-side, so
   // without this a visitor's first paint is the headline and then nothing --
@@ -851,7 +859,11 @@ async function main(): Promise<void> {
       if (!markerPattern.test(template)) {
         log.warn({ htmlPath }, "SSR markers not found in index.html; left unmodified");
       } else {
-        const ssrBlock = renderHeroSsr(summary, growthSeries);
+        // The paused switch lives in app.js so there is one place to flip it;
+        // read it from there rather than duplicating the date here.
+        const appJs = await readFile(join(dirname(htmlPath), "app.js"), "utf8").catch(() => "");
+        const pausedOn = /const COLLECTION_PAUSED_ON = "(\d{4}-\d{2}-\d{2})"/.exec(appJs)?.[1] ?? null;
+        const ssrBlock = renderHeroSsr(summary, growthSeries, pausedOn);
         const rendered = template.replace(
           markerPattern,
           `<!-- SSR-BEGIN -->${ssrBlock}<!-- SSR-END -->`,
