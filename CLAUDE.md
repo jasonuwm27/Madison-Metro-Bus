@@ -572,9 +572,23 @@ Collection stopped at ~2026-10-05 18:00 CT. There is no collector, database,
 timer or deploy running anywhere. **History from this date until a new VM
 runs is permanently missing** -- that is accepted, not an oversight.
 
-- Data lives in Google Drive only: `gdrive:BusProject/archive` (raw shards)
-  and `gdrive:BusProject/backups` (pg_dumps). The final dump is the newest
-  `busproject-2026-10-0*.dump` there.
+- Data lives in Google Drive only, all MD5-verified at shutdown:
+
+  | Drive path | Contents |
+  |---|---|
+  | `BusProject/archive` | 1,386 raw shards, 4.2 GB, 2026-09-16 -> 10-05 |
+  | `BusProject/archive-local` | 351 shards, 1.2 GB -- the parallel-run worker's independent archive (09-16 -> 09-22). Was never synced before; `upload-archive.ts` does not know about it |
+  | `BusProject/backups` | rolling pg_dumps (subject to retention pruning) |
+  | **`BusProject/keep`** | **outside retention, never prune:** `...-final-before-pause.dump` (restores to 852,576 obs, 09-21 -> 10-05, identical to live) and `...-supabase-0915-0920.dump` (213,832 obs, 09-15 -> 09-20) |
+
+  **The two `keep/` dumps together are the only complete Postgres history.**
+  The live DB had already lost raw rows before 09-21, and the 09-22 Supabase
+  snapshot named below was pruned by the dump retention policy because it sat
+  in `backups/` and matched `busproject-*.dump`. Anything that must survive
+  goes in `keep/`. Both dumps were restore-tested into scratch databases at
+  shutdown. (`bus-backup-verify` had been failing on `permission denied to
+  create database` -- the app role lacks CREATEDB -- so it had never proven a
+  restore. Fix that on the new VM.)
 - The site at madison-bus.pages.dev is a frozen snapshot served by Cloudflare
   Pages; it needs nothing from the VM. `COLLECTION_PAUSED_ON` in
   `site/public/app.js` switches all "collecting / updated nightly" copy to
