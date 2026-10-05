@@ -1,0 +1,33 @@
+[Unit]
+Description=Back archive up to Google Drive, then prune the local cache
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=opc
+Group=opc
+WorkingDirectory=/opt/bus/repo
+
+# ORDER IS ENFORCED INSIDE ONE PROCESS, NOT BY TWO UNITS.
+#
+# Upload-then-prune must never be separable. As a single invocation, the prune
+# can only act on shards this same run just confirmed by MD5 -- there is no
+# window in which a prune could run against stale or absent confirmation, and
+# no way for a failed upload to be followed by a prune that trusts it.
+#
+# --prune-days=45 keeps local disk inside Oracle's free block storage while
+# Drive holds everything permanently.
+ExecStart=/usr/bin/node --import tsx/esm scripts/upload-archive.ts --prune --prune-days=45
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bus-archive-sync
+
+# rclone's config holds the OAuth refresh token; it lives in the user's home,
+# which ProtectHome would hide. Expose only what is needed.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/pgdata/archive /opt/bus/repo

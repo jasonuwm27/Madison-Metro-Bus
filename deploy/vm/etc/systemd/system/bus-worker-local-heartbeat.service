@@ -1,0 +1,19 @@
+[Unit]
+Description=Heartbeat for bus-worker-local, based on rows written
+After=postgresql-17.service
+RequiresMountsFor=/mnt/pgdata
+
+[Service]
+Type=oneshot
+User=opc
+Group=opc
+SupplementaryGroups=bushc
+WorkingDirectory=/opt/bus/repo
+# Pings only if rows have actually landed. A worker that is "active" but
+# writing nothing must NOT keep the check green.
+ExecStart=/usr/local/bin/worker-heartbeat.sh WORKERLOCAL /opt/bus/repo/.env.local
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bus-worker-local-heartbeat
+NoNewPrivileges=true
+PrivateTmp=true

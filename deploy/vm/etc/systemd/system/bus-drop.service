@@ -1,0 +1,21 @@
+[Unit]
+Description=Partition eviction (400-day retention)
+After=network-online.target
+Requires=bus-rollup.service
+After=bus-rollup.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=opc
+Group=opc
+WorkingDirectory=/opt/bus/repo
+ExecStart=/usr/bin/node --import tsx/esm scripts/partitions.ts --drop --retain=400
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bus-drop
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/mnt/pgdata/archive /opt/bus/repo

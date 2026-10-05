@@ -1,0 +1,19 @@
+[Unit]
+Description=Weekly restore proof - restore a dump and compare row counts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=opc
+Group=opc
+WorkingDirectory=/opt/bus/repo
+ExecStart=/usr/bin/node --import tsx/esm scripts/backup-database.ts --verify-restore --no-prune
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bus-backup-verify
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/pgdata/archive /opt/bus/repo

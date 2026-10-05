@@ -17,12 +17,20 @@
 const DAY_LABEL = { 0: "Weekdays", 1: "Saturday", 2: "Sunday" };
 const LATE_THRESHOLD_MIN = 4;
 
+// Collection is paused: the VM was shut down on this date and nothing is
+// collecting or redeploying. Every "collecting / updated nightly / live"
+// claim on the site keys off this, so restarting collection is: set it to
+// null, restore LIVE_STATUS_URL below, redeploy. See CLAUDE.md "Paused".
+const COLLECTION_PAUSED_ON = "2026-10-05";
+
 // Live pulse: the one part of this static site that is actually live. See
 // workers/live-status/README.md for why a Worker exists at all and how its
 // free-tier budget holds up. Empty string means the pulse silently doesn't
 // render -- same "absence disables the feature" pattern as the server-side
-// healthcheck config.
-const LIVE_STATUS_URL = "https://bus-live-status.live-status.workers.dev";
+// healthcheck config. Emptied while paused: the Worker would otherwise keep
+// serving the VM's last push as "N buses tracked right now".
+// Restore to "https://bus-live-status.live-status.workers.dev" on resume.
+const LIVE_STATUS_URL = "";
 const LIVE_POLL_MS = 30_000; // matches the real collector's TripUpdates cadence
 
 const $ = (sel) => document.querySelector(sel);
@@ -193,7 +201,25 @@ function trustLineHtml(d, growth) {
   const since = new Date(d.firstServiceDate + "T12:00:00Z").toLocaleDateString(undefined, {
     month: "short", day: "numeric", year: "numeric",
   });
+  if (COLLECTION_PAUSED_ON) {
+    return `<p class="trust-line">Built from ${compactCount(totalN)} arrivals · Collected ${esc(since)} – ${esc(pausedLabel())} · Collection paused</p>`;
+  }
   return `<p class="trust-line">Built from ${compactCount(totalN)} arrivals · Collecting since ${esc(since)} · Updated nightly</p>`;
+}
+
+function pausedLabel(opts = { month: "short", day: "numeric", year: "numeric" }) {
+  return new Date(COLLECTION_PAUSED_ON + "T12:00:00Z").toLocaleDateString(undefined, opts);
+}
+
+/**
+ * Shown in place of the live pulse while paused. Says plainly that the
+ * numbers are frozen, so a visitor never reads a weeks-old figure as current.
+ */
+function pausedNoticeHtml() {
+  if (!COLLECTION_PAUSED_ON) return "";
+  return `<p class="small muted" style="margin:0 0 22px">
+    Data collection is paused as of ${esc(pausedLabel({ month: "long", day: "numeric", year: "numeric" }))}.
+    The figures below are a fixed snapshot and are not being updated.</p>`;
 }
 
 /**
@@ -247,7 +273,7 @@ function growthSectionHtml(d, growth) {
         <p class="growth-claim">Nobody else keeps this history — it did not exist before this site started collecting.</p>
         <p class="growth-sub">${totalN.toLocaleString()} arrivals recorded across ${d.serviceDays} service day${d.serviceDays === 1 ? "" : "s"}, every 30 seconds, archived from Madison Metro's public feed.</p>
         ${growthChartSvg(growth || [])}
-        <p class="growth-caption">Observations per day · dataset grows nightly, not live</p>
+        <p class="growth-caption">Observations per day · ${COLLECTION_PAUSED_ON ? "collection paused" : "dataset grows nightly, not live"}</p>
       </div>
     </section>`;
 }
@@ -305,7 +331,9 @@ function bannerHtml(d) {
   ].map(([b, s]) => `<div class="stat"><b>${esc(b)}</b><span>${esc(s)}</span></div>`).join("");
   return `
     <section class="banner" aria-label="About this dataset">
-      <div class="small muted"><strong>Collecting since ${esc(since)}.</strong> Every 30 seconds, continuously.</div>
+      <div class="small muted">${COLLECTION_PAUSED_ON
+        ? `<strong>Collected ${esc(since)} to ${esc(pausedLabel({ day: "numeric", month: "long", year: "numeric" }))}.</strong> Collection is paused.`
+        : `<strong>Collecting since ${esc(since)}.</strong> Every 30 seconds, continuously.`}</div>
       <div class="stat-row">${stats}</div>
     </section>
     <p class="tiny muted">${esc(generated)}</p>`;
@@ -452,6 +480,7 @@ function renderHome() {
       <h1>Is my bus late?</h1>
       <p class="lede">Historical on-time performance for every Madison Metro route and stop — not a live tracker.</p>
       ${trustLineHtml(INDEX.dataset, INDEX.growth)}
+      ${pausedNoticeHtml()}
       ${pulseHtml()}
 
       <div class="omnisearch">
@@ -586,7 +615,7 @@ function renderAllStops() {
     <h2 style="margin-top:10px">All stops</h2>
     <p class="small muted">
       ${ready.toLocaleString()} of ${INDEX.stops.length.toLocaleString()} stops have enough
-      arrivals to show a figure. The rest are still collecting.
+      arrivals to show a figure.${COLLECTION_PAUSED_ON ? "" : " The rest are still collecting."}
     </p>
     <input type="search" id="q2" placeholder="Stop name, e.g. Union South" autocomplete="off"
            enterkeyhint="search" aria-label="Search stops by name">
@@ -1179,8 +1208,8 @@ function renderAbout() {
     <div class="card">
       <h3>Where the data comes from</h3>
       <p>Madison Metro publishes a live feed of where its buses actually are and when they're
-      actually expected to arrive at each stop. This site checks that feed every 30 seconds,
-      around the clock, and keeps a permanent record of what it saw.</p>
+      actually expected to arrive at each stop. This site ${COLLECTION_PAUSED_ON ? "checked" : "checks"} that feed every 30 seconds,
+      around the clock, and ${COLLECTION_PAUSED_ON ? "kept" : "keeps"} a permanent record of what it saw.</p>
     </div>
 
     <div class="card">
@@ -1193,7 +1222,10 @@ function renderAbout() {
 
     <div class="card">
       <h3>How often this updates</h3>
-      <p>Collection runs continuously, but the numbers on this site are rebuilt and published
+      <p>${COLLECTION_PAUSED_ON
+        ? `Collection is paused as of ${esc(pausedLabel({ month: "long", day: "numeric", year: "numeric" }))}, so the
+      numbers on this site are a fixed snapshot and are not currently updating. Even while running,`
+        : `Collection runs continuously, but`} the numbers on this site are rebuilt and published
       once every night. So this is never a live tracker of where a bus is right now --
       it's a historical record of how a route or stop has actually performed, built from
       real arrivals rather than the schedule alone.</p>
@@ -1202,7 +1234,7 @@ function renderAbout() {
     ${d.firstServiceDate ? `
     <div class="card">
       <h3>How much history exists</h3>
-      <p>Collection began on ${esc(since)}. Nobody published this data before that date, and
+      <p>Collection began on ${esc(since)}${COLLECTION_PAUSED_ON ? ` and is paused as of ${esc(pausedLabel({ month: "long", day: "numeric", year: "numeric" }))}` : ""}. Nobody published this data before that date, and
       nobody else keeps an ongoing archive of it -- once a day passes, Metro's live feed moves
       on and that day's predictions are gone unless something recorded them first.</p>
     </div>` : ""}

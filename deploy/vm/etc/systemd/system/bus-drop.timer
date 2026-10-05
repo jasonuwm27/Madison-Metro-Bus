@@ -1,0 +1,10 @@
+[Unit]
+Description=Partition eviction at 15-day retention
+
+[Timer]
+OnCalendar=*-*-* 06:15:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

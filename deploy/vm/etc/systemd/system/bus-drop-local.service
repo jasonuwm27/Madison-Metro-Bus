@@ -1,0 +1,24 @@
+[Unit]
+Description=Partition eviction on LOCAL postgres (400-day retention)
+After=network-online.target postgresql-17.service
+Requires=bus-rollup-local.service
+After=bus-rollup-local.service
+RequiresMountsFor=/mnt/pgdata
+
+[Service]
+Type=oneshot
+User=opc
+Group=opc
+WorkingDirectory=/opt/bus/repo
+EnvironmentFile=/opt/bus/repo/.env.local
+# 400 days: the 50GB volume holds ~20 months of observations, so a year plus
+# margin costs nothing and keeps a full seasonal cycle of raw detail.
+ExecStart=/usr/bin/node --import tsx/esm scripts/partitions.ts --drop --retain=400
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bus-drop-local
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/pgdata/archive-local /opt/bus/repo

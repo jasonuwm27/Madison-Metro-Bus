@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly database backup
+
+[Timer]
+# 02:00 CT -- before the 03:15 rollup so the dump captures a quiet database,
+# and well clear of the 04:30 archive sync.
+OnCalendar=*-*-* 02:00:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

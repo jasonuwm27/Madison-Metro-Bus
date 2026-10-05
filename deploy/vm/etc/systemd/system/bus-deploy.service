@@ -1,0 +1,24 @@
+[Unit]
+Description=Export site data and deploy to Cloudflare Pages
+After=network-online.target postgresql-17.service
+Wants=network-online.target
+RequiresMountsFor=/mnt/pgdata
+
+[Service]
+Type=oneshot
+User=opc
+Group=opc
+SupplementaryGroups=bushc
+WorkingDirectory=/opt/bus/repo
+# Export + deploy in one process so a failed export cannot be followed by a
+# deploy that republishes stale numbers under a fresh timestamp.
+ExecStart=/usr/local/bin/healthcheck-wrap.sh DEPLOY /usr/local/bin/deploy-site.sh
+TimeoutStartSec=900
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bus-deploy
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/pgdata/archive /opt/bus/repo

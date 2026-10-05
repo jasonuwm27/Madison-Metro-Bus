@@ -1,0 +1,13 @@
+[Unit]
+Description=Heartbeat for bus-worker-local
+
+[Timer]
+# Check period is 1h with 30m grace on healthchecks.io, so ping every 15m:
+# two consecutive misses still land inside the grace window, meaning a single
+# transient blip does not page, but a genuine stall does.
+OnBootSec=3min
+OnUnitActiveSec=15min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

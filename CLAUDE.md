@@ -566,6 +566,26 @@ unreadable by systemd. Always relabel after `scp`-via-`/tmp`:
 The failure looks like a permission problem and is not -- ownership and mode
 will both be correct.
 
+## PAUSED (2026-10-05) -- VM and block volume shut down
+
+Collection stopped at ~2026-10-05 18:00 CT. There is no collector, database,
+timer or deploy running anywhere. **History from this date until a new VM
+runs is permanently missing** -- that is accepted, not an oversight.
+
+- Data lives in Google Drive only: `gdrive:BusProject/archive` (raw shards)
+  and `gdrive:BusProject/backups` (pg_dumps). The final dump is the newest
+  `busproject-2026-10-0*.dump` there.
+- The site at madison-bus.pages.dev is a frozen snapshot served by Cloudflare
+  Pages; it needs nothing from the VM. `COLLECTION_PAUSED_ON` in
+  `site/public/app.js` switches all "collecting / updated nightly" copy to
+  paused wording and disables the live-status call.
+- The `bus-live-status` Worker still exists but nothing calls it or pushes to it.
+- 2026-10-05 is a partial day, flagged as a known gap in `day_coverage`, so
+  it is excluded from reliability figures.
+- VM config is captured in `deploy/vm/`; its README lists the credentials
+  to recreate. The Cloudflare Pages token was IP-locked to the old VM and is
+  useless now -- a new VM needs a new one.
+
 ## Known gaps / next steps
 
 - **Departure-only stops are skipped.** 149 of 6,035 in the sample — trip origin

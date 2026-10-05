@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly site export and deploy
+
+[Timer]
+# 05:15 CT -- after the 03:15 rollup (so the day's data is in) and after the
+# 04:30 archive sync, before the 06:15 partition drop.
+OnCalendar=*-*-* 05:15:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Google Drive archive backup
+
+[Timer]
+# 04:30 CT: after the 03:15 rollup, before the 06:15 partition drop, and well
+# clear of the hour boundary so the current shard is closed rather than open.
+OnCalendar=*-*-* 04:30:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

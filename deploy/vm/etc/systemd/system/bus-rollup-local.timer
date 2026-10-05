@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily rollup (local postgres)
+[Timer]
+OnCalendar=*-*-* 03:25:00 America/Chicago
+Persistent=true
+[Install]
+WantedBy=timers.target

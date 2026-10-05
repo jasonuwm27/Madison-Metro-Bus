@@ -1,0 +1,7 @@
+[Unit]
+Description=Partition eviction (local postgres, 400d)
+[Timer]
+OnCalendar=*-*-* 06:25:00 America/Chicago
+Persistent=true
+[Install]
+WantedBy=timers.target

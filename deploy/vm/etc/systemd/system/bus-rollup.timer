@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily rollup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

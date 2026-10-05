@@ -1,0 +1,20 @@
+[Unit]
+Description=Daily rollup on LOCAL postgres
+After=network-online.target postgresql-17.service
+RequiresMountsFor=/mnt/pgdata
+
+[Service]
+Type=oneshot
+User=opc
+Group=opc
+WorkingDirectory=/opt/bus/repo
+EnvironmentFile=/opt/bus/repo/.env.local
+ExecStart=/usr/bin/node --import tsx/esm scripts/rollup.ts
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bus-rollup-local
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/pgdata/archive-local /opt/bus/repo

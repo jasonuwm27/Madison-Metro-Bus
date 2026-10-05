@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly restore verification
+
+[Timer]
+OnCalendar=Sun *-*-* 05:30:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

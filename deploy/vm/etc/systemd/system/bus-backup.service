@@ -1,0 +1,21 @@
+[Unit]
+Description=Nightly pg_dump to Google Drive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=opc
+Group=opc
+WorkingDirectory=/opt/bus/repo
+# Weekly restore proof runs on Sundays via bus-backup-verify; the nightly run
+# skips it to keep the window short.
+ExecStart=/usr/bin/node --import tsx/esm scripts/backup-database.ts
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bus-backup
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/pgdata/archive /opt/bus/repo

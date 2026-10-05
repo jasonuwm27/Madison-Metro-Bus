@@ -1,0 +1,19 @@
+[Unit]
+Description=Daily rollup of yesterday's observations
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=opc
+Group=opc
+WorkingDirectory=/opt/bus/repo
+ExecStart=/usr/bin/node --import tsx/esm scripts/rollup.ts
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bus-rollup
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/mnt/pgdata/archive /opt/bus/repo

@@ -1,0 +1,43 @@
+[Unit]
+Description=Madison Metro GTFS-RT collector
+Documentation=https://github.com/jasonuwm27/Madison-Metro-Bus
+After=network-online.target postgresql-17.service
+Wants=network-online.target
+# Local Postgres must be up; unlike the Supabase worker this one has no remote
+# to fall back to. BindsTo so it stops if the database goes away rather than
+# spinning on connection errors.
+BindsTo=postgresql-17.service
+RequiresMountsFor=/mnt/pgdata
+
+[Service]
+Type=simple
+User=opc
+Group=opc
+WorkingDirectory=/opt/bus/repo
+# The ONLY difference from bus-worker: which env file it loads. Same code,
+# same feeds, independent database and archive dir -- which is what makes a
+# matching diff meaningful rather than tautological.
+EnvironmentFile=/opt/bus/repo/.env
+ExecStart=/usr/bin/node --import tsx/esm src/worker.ts
+
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bus-worker-local
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/mnt/pgdata/archive /opt/bus/repo
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

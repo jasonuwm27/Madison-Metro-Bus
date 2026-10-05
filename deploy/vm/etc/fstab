@@ -1,0 +1,30 @@
+#
+# /etc/fstab
+# Created by anaconda on Thu Jul  9 07:00:28 2026
+#
+# Accessible filesystems, by reference, are maintained under '/dev/disk/'.
+# See man pages fstab(5), findfs(8), mount(8) and/or blkid(8) for more info.
+#
+# After editing this file, run 'systemctl daemon-reload' to update systemd
+# units generated from this file.
+#
+/dev/mapper/ocivolume-root /                       xfs     defaults        0 0
+UUID=88d3ee9a-b987-45cc-a3ce-75aebba9bccd /boot                   xfs     defaults        0 0
+UUID=7049-BB0F          /boot/efi               vfat    defaults,uid=0,gid=0,umask=077,shortname=winnt 0 2
+/dev/mapper/ocivolume-oled /var/oled               xfs     defaults        0 0
+tmpfs                   /dev/shm                tmpfs   defaults,nodev,nosuid,noexec      0 0
+######################################
+## ORACLE CLOUD INFRASTRUCTURE CUSTOMERS
+##
+## If you are adding an iSCSI remote block volume to this file you MUST
+## include the '_netdev' mount option or your instance will become
+## unavailable after the next reboot.
+## SCSI device names are not stable across reboots; please use the device UUID instead of /dev path.
+##
+## Example:
+## UUID="94c5aade-8bb1-4d55-ad0c-388bb8aa716a"   /data1    xfs       defaults,noatime,_netdev      0      2
+##
+## More information:
+## https://docs.us-phoenix-1.oraclecloud.com/Content/Block/Tasks/connectingtoavolume.htm
+/.swapfile	none	swap	sw	0	0
+UUID=d94a6856-d7f3-499a-8988-ff5e51d6d7e6  /mnt/pgdata  xfs  defaults,nofail,x-systemd.device-timeout=30  0  2

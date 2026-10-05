@@ -1,0 +1,46 @@
+[Unit]
+Description=Madison Metro GTFS-RT collector
+Documentation=https://github.com/jasonuwm27/Madison-Metro-Bus
+# Network-online, not just network: the worker's first act is an HTTPS fetch,
+# and starting before DNS is up wastes a retry cycle on every boot.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opc
+Group=opc
+WorkingDirectory=/opt/bus/repo
+# tsx runs the TypeScript directly. No build step to drift out of date with the
+# source, which matters because a stale dist/ would fail silently rather than
+# loudly. Node 22 + tsx starts in well under a second.
+ExecStart=/usr/bin/node --import tsx/esm src/worker.ts
+
+Restart=always
+RestartSec=10
+# Do not give up restarting. The default (5 starts in 10s) would permanently
+# stop the unit after a burst of early crashes -- and a collector that has
+# quietly given up is the single worst failure mode this project has.
+StartLimitIntervalSec=0
+
+# SIGTERM lets the worker close archive shards cleanly; a half-written shard
+# would be unreadable. Generous stop timeout so that flush can finish.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bus-worker
+
+# Hardening. The worker needs outbound network, its repo, and the archive dir.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/mnt/pgdata/archive /opt/bus/repo
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
